@@ -1,6 +1,6 @@
 from __future__ import print_function
 import os
-os.environ["CUDA_VISIBLE_DEVICES"]="2"
+#os.environ["CUDA_VISIBLE_DEVICES"]="0"
 import time
 import random
 import argparse
@@ -70,7 +70,7 @@ parser.add_argument('--binary', action='store_true', help='z from bernoulli dist
 opt = parser.parse_args()
 # opt = parser.parse_args(arg_list)
 print(opt)
-if opt.model == 'DRAGAN':
+if opt.model == 'DRAGAN' or opt.model == 'RESNET':
     #norm = 'LayerNorm'
     norm = 'LayerNorm'
 else:
@@ -153,8 +153,8 @@ elif opt.model == 'IGAN':
     netG = models._netG_2(ngpu, nz, nc, ngf)
     netD = models._netD_2(ngpu, nz, nc, ndf)
 elif opt.model == 'RESNET':
-    netG = srresnet.NetG()
-    netD = srresnet.NetD(norm)
+    netG = srresnet.NetG(opt.imageSize)
+    netD = srresnet.NetD(norm, opt.imageSize)
 
 netG.apply(weights_init)
 if opt.netG != '':
@@ -235,7 +235,7 @@ for epoch in range(opt.niter):
         errD = errD_real + errD_fake
 
         # Gradient penalty for DRAGAN
-        if opt.model == 'DRAGAN':
+        if opt.model == 'DRAGAN' or opt.model == 'RESNET':
             gradient_loss = calc_gradient_penalty_DRAGAN(netD, input)
             gradient_loss.backward()
             errD += gradient_loss
@@ -263,8 +263,8 @@ for epoch in range(opt.niter):
                  errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2, end_iter-start_iter))
         if i % 400 == 0:
             # the first 64 samples from the mini-batch are saved.
-            vutils.save_image(real_cpu[0:64,:,:,:],
-                    '%s/real_samples_%03d_%04d.png' % (opt.imDir, epoch, i), nrow=8)
+            #vutils.save_image(real_cpu[0:64,:,:,:],
+            #        '%s/real_samples_%03d_%04d.png' % (opt.imDir, epoch, i), nrow=8)
             fake,_ = netG(noise)
             vutils.save_image(fake.data[0:64,:,:,:],
                     '%s/fake_samples_epoch_%03d_%04d.png' % (opt.imDir, epoch, i), nrow=8)
