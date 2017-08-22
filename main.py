@@ -1,6 +1,6 @@
 from __future__ import print_function
 import os
-#os.environ["CUDA_VISIBLE_DEVICES"]="0"
+os.environ["CUDA_VISIBLE_DEVICES"]="2"
 import time
 import random
 import argparse
@@ -21,14 +21,14 @@ import srresnet
 from models import weights_init
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataRoot', default='./danbooru-faces', help='path to dataset')
+parser.add_argument('--dataRoot', default='./faces', help='path to dataset')
 parser.add_argument('--workers', type=int, default=12, help='number of data loading workers')
-parser.add_argument('--batchSize', type=int, default=128, help='input batch size')
-parser.add_argument('--imageSize', type=int, default=64, help='the height / width of the input image to network')
-parser.add_argument('--nz', type=int, default=128, help='size of the latent z vector')
+parser.add_argument('--batchSize', type=int, default=64, help='input batch size')
+parser.add_argument('--imageSize', type=int, default=128, help='the height / width of the input image to network')
+parser.add_argument('--nz', type=int, default=100, help='size of the latent z vector')
 parser.add_argument('--ngf', type=int, default=64)
 parser.add_argument('--ndf', type=int, default=64)
-parser.add_argument('--niter', type=int, default=100, help='number of epochs to train for')
+parser.add_argument('--niter', type=int, default=600, help='number of epochs to train for')
 parser.add_argument('--lr', type=float, default=0.0002, help='learning rate, default=0.0002')
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
 parser.add_argument('--cuda'  , type=int, default=1, help='enables cuda')
@@ -147,8 +147,8 @@ dataloader = torch.utils.data.DataLoader(dataset, batch_size=opt.batchSize,
 
 # load models 
 if opt.model == 'DCGAN' or opt.model == 'DRAGAN':
-    netG = models._netG_1(ngpu, nz, nc, ngf, n_extra_g, opt.pix_shuf)
-    netD = models._netD_1(ngpu, nz, nc, ndf, n_extra_d, norm)
+    netG = models._netG_1(ngpu, nz, nc, ngf, n_extra_g, opt.pix_shuf, opt.imageSize)
+    netD = models._netD_1(ngpu, nz, nc, ndf, n_extra_d, norm, opt.imageSize)
 elif opt.model == 'IGAN':
     netG = models._netG_2(ngpu, nz, nc, ngf)
     netD = models._netD_2(ngpu, nz, nc, ndf)
@@ -261,10 +261,10 @@ for epoch in range(opt.niter):
         print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f Elapsed %.2f s'
               % (epoch, opt.niter, i, len(dataloader),
                  errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2, end_iter-start_iter))
-        if i % 400 == 0:
+        if i % 1000 == 0:
             # the first 64 samples from the mini-batch are saved.
-            #vutils.save_image(real_cpu[0:64,:,:,:],
-            #        '%s/real_samples_%03d_%04d.png' % (opt.imDir, epoch, i), nrow=8)
+            vutils.save_image(real_cpu[0:64,:,:,:],
+                    '%s/real_samples_%03d_%04d.png' % (opt.imDir, epoch, i), nrow=8)
             fake,_ = netG(noise)
             vutils.save_image(fake.data[0:64,:,:,:],
                     '%s/fake_samples_epoch_%03d_%04d.png' % (opt.imDir, epoch, i), nrow=8)

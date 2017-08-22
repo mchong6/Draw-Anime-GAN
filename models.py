@@ -29,7 +29,7 @@ def weights_init(m):
 
 # DCGAN model, fully convolutional architecture
 class _netG_1(nn.Module):
-    def __init__(self, ngpu, nz, nc , ngf, n_extra_layers_g, pix_shuf):
+    def __init__(self, ngpu, nz, nc , ngf, n_extra_layers_g, pix_shuf, imageSize):
         super(_netG_1, self).__init__()
         self.ngpu = ngpu
         #self.nz = nz
@@ -40,13 +40,29 @@ class _netG_1(nn.Module):
             self.conv2 = self.upsample_2x(ngf*8, ngf*4*4, 3, 1, 1)
             self.conv3 = self.upsample_2x(ngf*4, ngf*2*4, 3, 1, 1)
             self.conv4 = self.upsample_2x(ngf*2, ngf*4, 3, 1, 1)
-            self.conv_out = self.upsample_2x(ngf, nc*4, 3, 1, 1)
+            if imageSize == 128:
+                self.conv_out = nn.Sequential(
+                                self.upsample_2x(ngf, ngf*4, 3, 1, 1),
+                                nn.BatchNorm2d(ngf),
+                                nn.LeakyReLU(0.2, inplace=True),
+                                self.upsample_2x(ngf, nc*4, 3, 1, 1)
+                                )
+            else:
+                self.conv_out = self.upsample_2x(ngf, nc*4, 3, 1, 1)
         else:
             self.conv1 = nn.ConvTranspose2d(nz, ngf * 8, 4, 1, 0, bias=False)
             self.conv2 = nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False)
             self.conv3 = nn.ConvTranspose2d(ngf * 4, ngf * 2, 4, 2, 1, bias=False)
             self.conv4 = nn.ConvTranspose2d(ngf * 2, ngf, 4, 2, 1, bias=False)
-            self.conv_out = nn.ConvTranspose2d(ngf, nc, 4, 2, 1, bias=False)
+            if imageSize == 128:
+                self.conv_out = nn.Sequential(
+                                nn.ConvTranspose2d(ngf, ngf, 4, 2, 1, bias=False),
+                                nn.BatchNorm2d(ngf),
+                                nn.LeakyReLU(0.2, inplace=True),
+                                nn.ConvTranspose2d(ngf, nc, 4, 2, 1, bias=False)
+                                )
+            else:
+                self.conv_out = nn.ConvTranspose2d(ngf, nc, 4, 2, 1, bias=False)
 
         self.main = nn.Sequential(
                 # state size. nz x 1 x 1
@@ -83,13 +99,14 @@ class _netG_1(nn.Module):
                          nn.Tanh())
 
     def upsample_2x(self, inch, outch, ksize, stride, pad):
-        layers = [nn.Conv2d(inch, outch, ksize, stride, pad, bias=False), \
+        layers = [nn.Conv2d(inch, outch, ksize, stride, pad, bias=False), 
                 nn.PixelShuffle(2)]
         return nn.Sequential(*layers)
     def upsample_4x(self, inch, outch, ksize, stride, pad):
-        layers = [nn.Conv2d(inch, outch, ksize, stride, pad, bias=False), \
+        layers = [nn.Conv2d(inch, outch, ksize, stride, pad, bias=False), 
                 nn.PixelShuffle(4)]
         return nn.Sequential(*layers)
+
 
 
     def forward(self, input):
@@ -99,21 +116,32 @@ class _netG_1(nn.Module):
         return nn.parallel.data_parallel(self.main, input, gpu_ids), 0
 
 class _netD_1(nn.Module):
-    def __init__(self, ngpu, nz, nc, ndf,  n_extra_layers_d, norm):
+    def __init__(self, ngpu, nz, nc, ndf,  n_extra_layers_d, norm, imageSize):
         super(_netD_1, self).__init__()
         self.ngpu = ngpu
         if norm == 'BatchNorm':
             self.norm1 = nn.BatchNorm2d(ndf * 2)
             self.norm2 = nn.BatchNorm2d(ndf * 4)
             self.norm3 = nn.BatchNorm2d(ndf * 8)
+            self.norm_128 = nn.BatchNorm2d(ndf)
         else:
             self.norm1 = LayerNormalization(ndf * 2)
             self.norm2 = LayerNormalization(ndf * 4)
             self.norm3 = LayerNormalization(ndf * 8)
+            self.norm_128 = LayerNormalization(ndf)
+        if imageSize == 128:
+            self.conv1 = nn.Sequential(
+                            nn.Conv2d(nc, ndf, 4, 2, 1, bias=False), # 5,3,1 for 96x96
+                            nn.LeakyReLU(0.2, inplace=True),
+                            nn.Conv2d(ndf, ndf, 4, 2, 1, bias=False), # 5,3,1 for 96x96
+                            self.norm_128
+                            )
+        else:
+            self.conv1 = nn.Conv2d(nc, ndf, 4, 2, 1, bias=False), # 5,3,1 for 96x96
 
         main = nn.Sequential(
+            self.conv1,
             # input is (nc) x 96 x 96
-            nn.Conv2d(nc, ndf, 4, 2, 1, bias=False), # 5,3,1 for 96x96
             nn.LeakyReLU(0.2, inplace=True),
             # state size. (ndf) x 32 x 32
             nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
