@@ -7,7 +7,7 @@
 
 
 ### Background
-Most of the code is based on [animeGAN](https://github.com/jayleicn/animeGAN) and it started off from experimenting with his project. However, I realized that his dataset consists of many bad images. I thus wrote a simple script image_check.py to remove images that does not have faces and black and white images. Still, the results are not optimistic due to the bad quality images from [danbooru.donmai.us](http://danbooru.donmai.us/).
+Most of the code is based on [animeGAN](https://github.com/jayleicn/animeGAN) and it started off from experimenting with his project. However, I realized that his dataset consists of many bad images. I thus wrote a simple script image_check.py to remove images that does not have faces and black and white images. Still, the results are not optimistic due to the bad quality images from [danbooru.donmai.us](http://danbooru.donmai.us/). I thus decided to create my own dataset following inspiration from [MakeGirls.moe](https://github.com/makegirlsmoe/makegirls.moe_web).
 
 ### Model
 For my vanilla version, I use a DCGAN but instead of a deconvolution to upsample the image, I used PixelShuffle which has shown great result. I've also implemented [DRAGAN](https://github.com/kodalinaveen3/DRAGAN) which uses a gradient penalty. I am still experimenting with DRAGAN but preliminary results are bad and could be due to the small dataset. I've also implemented a rough version of an [SRResnet](https://github.com/kodalinaveen3/DRAGAN) which I've yet to test due to hardware constraints.
