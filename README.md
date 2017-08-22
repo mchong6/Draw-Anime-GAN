@@ -10,7 +10,7 @@
 Most of the code is based on [animeGAN](https://github.com/jayleicn/animeGAN) and it started off from experimenting with his project. However, I realized that his dataset consists of many bad images. I thus wrote a simple script image_check.py to remove images that does not have faces and black and white images. Still, the results are not optimistic due to the bad quality images from [danbooru.donmai.us](http://danbooru.donmai.us/). I thus decided to create my own dataset following inspiration from [MakeGirls.moe](https://github.com/makegirlsmoe/makegirls.moe_web).
 
 ### Model
-For my vanilla version, I use a DCGAN but instead of a deconvolution to upsample the image, I used PixelShuffle which has shown great result. I've also implemented [DRAGAN](https://github.com/kodalinaveen3/DRAGAN) which uses a gradient penalty. I am still experimenting with DRAGAN but preliminary results are bad and could be due to the small dataset. I've also implemented a rough version of an [SRResnet](https://github.com/kodalinaveen3/DRAGAN) which I've yet to test due to hardware constraints.
+For my vanilla version, I use a DCGAN but instead of a deconvolution to upsample the image, I used PixelShuffle which has shown great results. I've also implemented [DRAGAN](https://github.com/kodalinaveen3/DRAGAN) which uses a gradient penalty. I am still experimenting with DRAGAN but preliminary results are bad and could be due to the small dataset. I've also implemented a rough version of an [SRResnet](https://github.com/kodalinaveen3/DRAGAN) which I've yet to test due to hardware constraints.
 
 This is a result from DCGAN with PixelShuffle at about epoch.
 ![fake_sample_1](images/fake_sample.png)
@@ -31,3 +31,8 @@ To run the experiment, for DCGAN with PixelShuffle and noise of dimension 100,
 $ python main.py --pix_shuf=1 --model='DCGAN' --outDir='./some_directory' --nz=100
 ```
 
+### Importance of Dataset
+Using the exact same model, I also trained on the dataset used by [animeGAN](https://github.com/jayleicn/animeGAN). However, due to the dataset being 64x64, my model also generated output of 64x64. I cleaned the dataset further by removing bad faces, pruning the dataset from 143,000 images to around 100,000 images. The following is the generated image after 100 epochs of training with DCGAN and PixelShuffle.
+
+
+![fake_sample_old](images/fake_sample_old.png)
