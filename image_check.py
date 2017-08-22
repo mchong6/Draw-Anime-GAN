@@ -4,7 +4,7 @@ import os
 from colorthief import ColorThief
 
 ''' Takes in an image and check if there is a face.
-    If not, move it to a temporaru folder to check'''
+    If not, move it to a temporary folder to check'''
 def detect(filename, file, cascade_file = "./lbpcascade_animeface.xml"):
     if not os.path.isfile(cascade_file):
         raise RuntimeError("%s: not found" % cascade_file)

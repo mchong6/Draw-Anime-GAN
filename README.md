@@ -17,7 +17,7 @@ This is a result from DCGAN with PixelShuffle at about epoch.
 
 ### Dataset
 
-The custom dataset consists of about 12,000 images scraped from [www.getchu.com](http://www.getchu.com/) using a customized version of the crawler [imagebot](https://github.com/amol9/imagebot/). The size of the dataset is due to my bandwidth constraint and lack of time. 
+The custom dataset consists of about 12,000 images scraped from [www.getchu.com](http://www.getchu.com/) using a customized version of the crawler [imagebot](https://github.com/amol9/imagebot/). The size of the dataset is due to my bandwidth constraint and lack of time. I am not very familiar with the scraper so my code is kind of a hack. To save myself from embarassment I will not upload my crawler. Also, I would be happy to upload the dataset. However, I am unsure if it will get me into any trouble with copyright issues or anything.
 
 ![real_sample](images/real_sample.png)
 
