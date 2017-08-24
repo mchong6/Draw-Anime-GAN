@@ -13,7 +13,7 @@ Most of the code is based on [animeGAN](https://github.com/jayleicn/animeGAN) an
 For my vanilla version, I use a DCGAN but instead of a deconvolution to upsample the image, I used PixelShuffle which has shown great results. I've also implemented [DRAGAN](https://github.com/kodalinaveen3/DRAGAN) which uses a gradient penalty. I am still experimenting with DRAGAN but preliminary results are bad and could be due to the small dataset. I've also implemented a rough version of an [SRResnet](https://github.com/kodalinaveen3/DRAGAN) which I've yet to test due to hardware constraints.
 
 This is a result from DCGAN with PixelShuffle at about epoch.
-<img src="images/fakes_samples_new.png" width="40%"
+<img src="images/fakes_samples_new.png" width="40%">
 ![fake_sample_1](images/fakes_samples_new.png){:height="50%" width="50%"}
 
 ### Dataset
