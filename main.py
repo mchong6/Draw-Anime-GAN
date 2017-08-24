@@ -23,7 +23,7 @@ from models import weights_init
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataRoot', default='./faces', help='path to dataset')
 parser.add_argument('--workers', type=int, default=12, help='number of data loading workers')
-parser.add_argument('--batchSize', type=int, default=64, help='input batch size')
+parser.add_argument('--batchSize', type=int, default=128, help='input batch size')
 parser.add_argument('--imageSize', type=int, default=128, help='the height / width of the input image to network')
 parser.add_argument('--nz', type=int, default=100, help='size of the latent z vector')
 parser.add_argument('--ngf', type=int, default=64)
@@ -41,6 +41,7 @@ parser.add_argument('--d_labelSmooth', type=float, default=0.1, help='for D, use
 parser.add_argument('--n_extra_layers_d', type=int, default=0, help='number of extra conv layers in D')
 parser.add_argument('--n_extra_layers_g', type=int, default=1, help='number of extra conv layers in G')
 parser.add_argument('--pix_shuf'  , type=int, default=1, help='Use pixel shuffle instead of deconvolution')
+parser.add_argument('--white_noise'  , type=int, default=0, help='Add white noise to inputs of discriminator to stabilize training')
 parser.add_argument('--lambda_'  , type=int, default=10, help='Weight of gradient penalty (DRAGAN)')
 parser.add_argument('--binary', action='store_true', help='z from bernoulli distribution, with prob=0.5')
 
@@ -170,6 +171,7 @@ criterion = nn.BCELoss()
 criterion_MSE = nn.MSELoss()
 
 input = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
+additive_noise = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
 noise = torch.FloatTensor(opt.batchSize, nz, 1, 1)
 if opt.binary:
     bernoulli_prob = torch.FloatTensor(opt.batchSize, nz, 1, 1).fill_(0.5)
@@ -186,11 +188,12 @@ if opt.cuda:
     netG.cuda()
     criterion.cuda()
     criterion_MSE.cuda()
-    input, label = input.cuda(), label.cuda()
+    input, label, additive_noise = input.cuda(), label.cuda(), additive_noise.cuda()
     noise, fixed_noise, epsilon = noise.cuda(), fixed_noise.cuda(), epsilon.cuda()
     
 input = Variable(input)
 label = Variable(label)
+additive_noise = Variable(additive_noise)
 noise = Variable(noise)
 fixed_noise = Variable(fixed_noise)
 epsilon = Variable(epsilon)
@@ -212,6 +215,10 @@ for epoch in range(opt.niter):
         input.data.resize_(real_cpu.size()).copy_(real_cpu)
         label.data.resize_(batchSize).fill_(real_label - opt.d_labelSmooth) # use smooth label for discriminator
 
+        if opt.white_noise:
+            additive_noise.data.resize_(input.size()).normal_(0, 0.005)
+            input.data.add_(additive_noise.data)
+
         output = netD(input)
         # Prevent numerical instability
         #output = lowerbound(output)
@@ -227,6 +234,11 @@ for epoch in range(opt.niter):
             noise.data.normal_(0, 1)
         fake,z_prediction = netG(noise)
         label.data.fill_(fake_label)
+
+        if opt.white_noise:
+            additive_noise.data.resize_(fake.size()).normal_(0, 0.005)
+            fake.data.add_(additive_noise.data)
+
         output = netD(fake.detach()) # add ".detach()" to avoid backprop through G
         #output = lowerbound(output)
         errD_fake = criterion(output, label)
