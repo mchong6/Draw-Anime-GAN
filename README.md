@@ -15,7 +15,6 @@ For my vanilla version, I use a DCGAN but instead of a deconvolution to upsample
 This is a result from DCGAN with PixelShuffle at about epoch.
 
 <img src="images/fakes_samples_new.png" width="70%">
-![fake_sample_1](images/fakes_samples_new.png){:height="50%" width="50%"}
 
 ### Dataset
 
