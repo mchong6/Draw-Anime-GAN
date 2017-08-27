@@ -1,6 +1,6 @@
 from __future__ import print_function
 import os
-os.environ["CUDA_VISIBLE_DEVICES"]="2"
+os.environ["CUDA_VISIBLE_DEVICES"]="1"
 import time
 import random
 import argparse
@@ -23,7 +23,7 @@ from models import weights_init
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataRoot', default='./faces', help='path to dataset')
 parser.add_argument('--workers', type=int, default=12, help='number of data loading workers')
-parser.add_argument('--batchSize', type=int, default=128, help='input batch size')
+parser.add_argument('--batchSize', type=int, default=64, help='input batch size')
 parser.add_argument('--imageSize', type=int, default=128, help='the height / width of the input image to network')
 parser.add_argument('--nz', type=int, default=100, help='size of the latent z vector')
 parser.add_argument('--ngf', type=int, default=64)
@@ -102,12 +102,7 @@ if torch.cuda.is_available() and not opt.cuda:
     print("WARNING: You have a CUDA device, so you should probably run with --cuda")
 
 def calc_gradient_penalty_DRAGAN(netD, X):
-    #different alpha size for latent/image
-    if X.dim() == 2:
-        # use size(0) instead of batchsize to prevent smaller batchsize during last batch
-        alpha = torch.rand(X.size(0), 1)
-    else:
-        alpha = torch.rand(X.size(0), 1, 1, 1)
+    alpha = torch.rand(X.size(0), 1, 1, 1)
     alpha = alpha.expand(X.size()).cuda()
 
     rand = torch.rand(X.size()).cuda()
@@ -232,12 +227,15 @@ for epoch in range(opt.niter):
             noise.data.copy_(2*(torch.bernoulli(bernoulli_prob)-0.5))
         else:
             noise.data.normal_(0, 1)
-        fake,z_prediction = netG(noise)
+        fake_o,z_prediction = netG(noise)
         label.data.fill_(fake_label)
 
         if opt.white_noise:
-            additive_noise.data.resize_(fake.size()).normal_(0, 0.005)
-            fake.data.add_(additive_noise.data)
+            additive_noise.data.normal_(0, 0.005)
+            fake = fake_o + additive_noise
+            #fake.data.add_(additive_noise.data)
+        else:
+            fake = fake_o
 
         output = netD(fake.detach()) # add ".detach()" to avoid backprop through G
         #output = lowerbound(output)
@@ -259,7 +257,7 @@ for epoch in range(opt.niter):
         ###########################
         netG.zero_grad()
         label.data.fill_(real_label) # fake labels are real for generator cost
-        output = netD(fake)
+        output = netD(fake_o)
         #output = lowerbound(output)
         errG = criterion(output, label)
         errG.backward(retain_variables=True) # True if backward through the graph for the second time
@@ -284,3 +282,4 @@ for epoch in range(opt.niter):
         # do checkpointing
         torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.modelsDir, epoch))
         torch.save(netD.state_dict(), '%s/netD_epoch_%d.pth' % (opt.modelsDir, epoch))
+

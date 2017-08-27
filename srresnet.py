@@ -52,7 +52,8 @@ class NetG(nn.Module):
         super(NetG, self).__init__()
         
         self.imageSize = imageSize
-        self.conv_input = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv_input = nn.Conv2d(in_channels=2, out_channels=64, kernel_size=3, stride=1, padding=1, bias=False)
+        self.linear = nn.Linear(128, 512)
         self.relu = nn.LeakyReLU(0.2, inplace=True)
         
         self.residual = self.make_layer(_Residual_Block, 6)
@@ -81,13 +82,9 @@ class NetG(nn.Module):
                 nn.PixelShuffle(2),
                 nn.LeakyReLU(0.2, inplace=True),
             )
-        self.upscale_2x = nn.Sequential(
-            nn.Conv2d(in_channels=2, out_channels=256, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.PixelShuffle(2),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
 
         self.conv_output = nn.Conv2d(in_channels=64, out_channels=3, kernel_size=9, stride=1, padding=4, bias=False)
+        self.tanh = nn.Tanh()
         
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -108,15 +105,15 @@ class NetG(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        x = x.view(-1, 2, 8, 8)
-        out = self.upscale_2x(x)
+        out = self.linear(x.view(-1, 128))
+        out = out.view(-1, 2, 16, 16)
         out = self.relu(self.conv_input(out))
         residual = out
         out = self.residual(out)
         out = self.bn_mid(self.conv_mid(out))
         out = torch.add(out,residual)
         out = self.upscale(out)
-        out = self.conv_output(out)
+        out = self.tanh(self.conv_output(out))
         return out, 0
 
 
@@ -126,9 +123,21 @@ class NetD(nn.Module):
         
         self.imageSize = imageSize
         self.norm = norm
-        self.conv_input = nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3, stride=2, padding=1, bias=False)
         self.relu = nn.LeakyReLU(0.2, inplace=True)
         self.sigmoid = nn.Sigmoid()
+        if imageSize == 128:
+            self.conv_input = nn.Sequential(
+                        nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3, stride=2, padding=1, bias=False),
+                        self.relu,
+                        nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=2, padding=1, bias=False),
+                        self.relu,
+                        LayerNormalization(64)
+                    )
+        else:
+            self.conv_input = nn.Sequential(
+                        nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3, stride=2, padding=1, bias=False),
+                        self.relu
+                    )
         self.ln1 = LayerNormalization(64)
         self.ln2 = LayerNormalization(3)
         self.residual = self.make_layer(_Residual_Block, 5)
@@ -155,7 +164,7 @@ class NetD(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        out = self.relu(self.conv_input(x))
+        out = self.conv_input(x)
         residual = out
         out = self.residual(out)
         out = self.ln1(self.conv_mid(out))
