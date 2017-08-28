@@ -139,11 +139,11 @@ class NetD(nn.Module):
                         self.relu
                     )
         self.ln1 = LayerNormalization(64)
-        self.ln2 = LayerNormalization(3)
+        self.ln2 = LayerNormalization(64)
         self.residual = self.make_layer(_Residual_Block, 5)
         self.conv_mid = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1, padding=1, bias=False)
-        self.conv_output = nn.Conv2d(in_channels=64, out_channels=3, kernel_size=3, stride=2, padding=1, bias=False)
-        self.conv_fc = nn.Conv2d(in_channels=3, out_channels=1, kernel_size=16, stride=1, padding=0, bias=False)
+        self.conv_output = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=2, padding=1, bias=False)
+        self.conv_fc = nn.Conv2d(in_channels=64, out_channels=1, kernel_size=16, stride=1, padding=0, bias=False)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
