@@ -173,6 +173,5 @@ class NetD(nn.Module):
         out = self.ln2(out)
         out_d = self.conv_fc(out)
         out_d = self.sigmoid(out_d)
-        return out_d
         out_d = out_d.mean(0).view(1)
         return out_d

@@ -184,7 +184,8 @@ class _netD_1(nn.Module):
             output = nn.parallel.data_parallel(self.main, input, gpu_ids)
         # Avoid multi-gpu if only using one gpu
         output = self.main(input)
-        return output.view(-1, 1)
+        return output.mean(0).view(1)
+        #return output.view(-1, 1)
     
 
 

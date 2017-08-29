@@ -116,9 +116,8 @@ def calc_gradient_penalty_DRAGAN(netD, X):
 
 def lowerbound(input):
     output = torch.cat([input, epsilon], 0)
-    max_val = torch.max(output)
-    input.data.fill_(max_val.data[0])
-    return input
+    output = torch.max(output)
+    return output
 
     
 nc = 3
@@ -173,10 +172,10 @@ if opt.binary:
     fixed_noise = torch.bernoulli(bernoulli_prob)
 else:
     fixed_noise = torch.FloatTensor(opt.batchSize, nz, 1, 1).normal_(0, 1)
-label = torch.FloatTensor(opt.batchSize)
+label = torch.FloatTensor([1])
 real_label = 1
 fake_label = 0
-epsilon = torch.FloatTensor(opt.batchSize).fill_(1e-9)
+epsilon = torch.FloatTensor([1e-9])
 
 if opt.cuda:
     netD.cuda()
@@ -208,7 +207,7 @@ for epoch in range(opt.niter):
         real_cpu, _ = data
         batchSize = real_cpu.size(0)
         input.data.resize_(real_cpu.size()).copy_(real_cpu)
-        label.data.resize_(batchSize).fill_(real_label - opt.d_labelSmooth) # use smooth label for discriminator
+        label.data.fill_(real_label - opt.d_labelSmooth) # use smooth label for discriminator
 
         if opt.white_noise:
             additive_noise.data.resize_(input.size()).normal_(0, 0.005)
@@ -216,7 +215,7 @@ for epoch in range(opt.niter):
 
         output = netD(input)
         # Prevent numerical instability
-        #output = lowerbound(output)
+        output = lowerbound(output)
         errD_real = criterion(output, label)
         errD_real.backward()
         D_x = output.data.mean()
@@ -238,14 +237,14 @@ for epoch in range(opt.niter):
             fake = fake_o
 
         output = netD(fake.detach()) # add ".detach()" to avoid backprop through G
-        #output = lowerbound(output)
+        output = lowerbound(output)
         errD_fake = criterion(output, label)
         errD_fake.backward() # gradients for fake/real will be accumulated
         D_G_z1 = output.data.mean()
         errD = errD_real + errD_fake
 
         # Gradient penalty for DRAGAN
-        if opt.model == 'DRAGAN' or opt.model == 'RESNET':
+        if opt.model == 'DRAGAN': #or opt.model == 'RESNET':
             gradient_loss = calc_gradient_penalty_DRAGAN(netD, input)
             gradient_loss.backward()
             errD += gradient_loss
@@ -258,7 +257,7 @@ for epoch in range(opt.niter):
         netG.zero_grad()
         label.data.fill_(real_label) # fake labels are real for generator cost
         output = netD(fake_o)
-        #output = lowerbound(output)
+        output = lowerbound(output)
         errG = criterion(output, label)
         errG.backward(retain_variables=True) # True if backward through the graph for the second time
         if opt.model == 'IGAN': # with z predictor
