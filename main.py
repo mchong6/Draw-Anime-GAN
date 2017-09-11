@@ -14,6 +14,7 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable, grad
+import numpy as np
 
 ### load project files
 import models
@@ -28,15 +29,15 @@ parser.add_argument('--imageSize', type=int, default=128, help='the height / wid
 parser.add_argument('--nz', type=int, default=100, help='size of the latent z vector')
 parser.add_argument('--ngf', type=int, default=64)
 parser.add_argument('--ndf', type=int, default=64)
-parser.add_argument('--niter', type=int, default=600, help='number of epochs to train for')
-parser.add_argument('--lr', type=float, default=0.0002, help='learning rate, default=0.0002')
+parser.add_argument('--niter', type=int, default=300000, help='number of epochs to train for')
+parser.add_argument('--lr', type=float, default=0.0001, help='learning rate, default=0.0002')
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
 parser.add_argument('--cuda'  , type=int, default=1, help='enables cuda')
 parser.add_argument('--ngpu'  , type=int, default=1, help='number of GPUs to use')
 parser.add_argument('--netG', default='', help="path to netG (to continue training)")
 parser.add_argument('--netD', default='', help="path to netD (to continue training)")
 parser.add_argument('--outDir', required=True, help='folder to output images and model checkpoints')
-parser.add_argument('--model', required=True, help='DCGAN | RESNET | IGAN | DRAGAN | WGAN')
+parser.add_argument('--model', required=True, help='DCGAN | RESNET | IGAN | DRAGAN | BEGAN')
 parser.add_argument('--d_labelSmooth', type=float, default=0.1, help='for D, use soft label "1-labelSmooth" for real samples')
 parser.add_argument('--n_extra_layers_d', type=int, default=0, help='number of extra conv layers in D')
 parser.add_argument('--n_extra_layers_g', type=int, default=1, help='number of extra conv layers in G')
@@ -44,6 +45,8 @@ parser.add_argument('--pix_shuf'  , type=int, default=1, help='Use pixel shuffle
 parser.add_argument('--white_noise'  , type=int, default=0, help='Add white noise to inputs of discriminator to stabilize training')
 parser.add_argument('--lambda_'  , type=int, default=10, help='Weight of gradient penalty (DRAGAN)')
 parser.add_argument('--binary', action='store_true', help='z from bernoulli distribution, with prob=0.5')
+parser.add_argument('--lr_decay_every', type=int, default=3000, help='decay lr this many iterations')
+parser.add_argument('--save_step', type=int, default=10000, help='save weights every 50000 iterations ')
 
 # simply prefer this way
 # arg_list = [
@@ -139,6 +142,7 @@ dataset = dset.ImageFolder(
 )
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=opt.batchSize,
                                          shuffle=True, num_workers=opt.workers)
+loader = iter(dataloader)
 
 # load models 
 if opt.model == 'DCGAN' or opt.model == 'DRAGAN':
@@ -150,6 +154,9 @@ elif opt.model == 'IGAN':
 elif opt.model == 'RESNET':
     netG = srresnet.NetG(opt.imageSize)
     netD = srresnet.NetD(norm, opt.imageSize)
+elif opt.model == 'BEGAN':
+    netG = models._netG_1(ngpu, nz, nc, ngf, n_extra_g, opt.pix_shuf, opt.imageSize)
+    netD = models.DiscriminatorCNN()
 
 netG.apply(weights_init)
 if opt.netG != '':
@@ -176,6 +183,10 @@ label = torch.FloatTensor([1])
 real_label = 1
 fake_label = 0
 epsilon = torch.FloatTensor([1e-9])
+#BEGAN parameters
+gamma = .7
+lambda_k = 0.001
+k = 0.
 
 if opt.cuda:
     netD.cuda()
@@ -196,17 +207,67 @@ epsilon = Variable(epsilon)
 optimizerD = optim.Adam(netD.parameters(), lr = opt.lr, betas = (opt.beta1, 0.999))
 optimizerG = optim.Adam(netG.parameters(), lr = opt.lr, betas = (opt.beta1, 0.999))
 
-for epoch in range(opt.niter):
-    for i, data in enumerate(dataloader, 0):
-        start_iter = time.time()
-        ############################
-        # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
-        ###########################
-        # train with real
-        netD.zero_grad()
-        real_cpu, _ = data
-        batchSize = real_cpu.size(0)
-        input.data.resize_(real_cpu.size()).copy_(real_cpu)
+def adjust_learning_rate(optimizer, niter):
+    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
+    lr = opt.lr * (0.95 ** (niter // opt.lr_decay_every))
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+    return optimizer
+
+for iteration in range(1, opt.niter+1):
+    try: 
+        data = loader.next()
+    except StopIteration:
+        loader = iter(dataloader)
+        data = loader.next()
+
+    start_iter = time.time()
+    ############################
+    # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
+    ###########################
+    # train with real
+    netD.zero_grad()
+    real_cpu, _ = data
+    batchSize = real_cpu.size(0)
+    input.data.resize_(real_cpu.size()).copy_(real_cpu)
+
+    if opt.model == 'BEGAN':
+        noise.data.resize_(batchSize, nz, 1, 1)
+        if opt.binary:
+            bernoulli_prob.resize_(noise.data.size())
+            noise.data.copy_(2*(torch.bernoulli(bernoulli_prob)-0.5))
+        else:
+            noise.data.normal_(0, 1)
+
+        fake, _ = netG(noise)
+        fake_recon = netD(fake.detach())
+        real_recon = netD(input)
+
+        err_real = torch.mean(torch.abs(real_recon - input))
+        err_fake = torch.mean(torch.abs(fake_recon - fake))
+
+        errD = err_real - k*err_fake
+        errD.backward()
+        optimizerD.step()
+
+        netG.zero_grad()
+        fake, _ = netG(noise)
+        fake_recons = netD(fake)
+        errG = torch.mean(torch.abs(fake_recons-fake))
+        errG.backward()
+        optimizerG.step()
+
+        balance = (gamma * err_real - err_fake).data[0]
+        k = min(max(k + lambda_k * balance,0),1)
+        measure = err_real.data[0] + np.abs(balance)
+
+        end_iter = time.time()
+        ########### Logging #########
+        print('[%d/%d] Loss_D: %.4f Loss_G: %.4f Measure: %.4f K: %.4f LR: %.8f'
+                  % (iteration, opt.niter, 
+                     errD.data[0], errG.data[0], measure, k, optimizerD.param_groups[0]['lr']))
+
+    else:
         label.data.fill_(real_label - opt.d_labelSmooth) # use smooth label for discriminator
 
         if opt.white_noise:
@@ -214,6 +275,7 @@ for epoch in range(opt.niter):
             input.data.add_(additive_noise.data)
 
         output = netD(input)
+
         # Prevent numerical instability
         output = lowerbound(output)
         errD_real = criterion(output, label)
@@ -265,20 +327,25 @@ for epoch in range(opt.niter):
             errG_z.backward()
         D_G_z2 = output.data.mean()
         optimizerG.step()
-        
+    
         end_iter = time.time()
-        print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f Elapsed %.2f s'
-              % (epoch, opt.niter, i, len(dataloader),
-                 errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2, end_iter-start_iter))
-        if i % 1000 == 0:
-            # the first 64 samples from the mini-batch are saved.
-            vutils.save_image(real_cpu[0:64,:,:,:],
-                    '%s/real_samples_%03d_%04d.png' % (opt.imDir, epoch, i), nrow=8)
-            fake,_ = netG(noise)
-            vutils.save_image(fake.data[0:64,:,:,:],
-                    '%s/fake_samples_epoch_%03d_%04d.png' % (opt.imDir, epoch, i), nrow=8)
-    if epoch % 1 == 0:
-        # do checkpointing
-        torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.modelsDir, epoch))
-        torch.save(netD.state_dict(), '%s/netD_epoch_%d.pth' % (opt.modelsDir, epoch))
 
+        print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f Elapsed %.2f s'
+              % (iteration, opt.niter, i, len(dataloader),
+                 errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2, end_iter-start_iter))
+
+    ########### Learning Rate Decay #########
+    optimizerD = adjust_learning_rate(optimizerD,iteration)
+    optimizerG = adjust_learning_rate(optimizerG,iteration)
+
+
+    if iteration % 500 == 0:
+        # the first 64 samples from the mini-batch are saved.
+        #vutils.save_image(real_cpu[0:64,:,:,:],
+        #        '%s/real_samples_%03d_%04d.png' % (opt.imDir, epoch, i), nrow=8)
+        fake,_ = netG(noise)
+        vutils.save_image(fake.data[0:64,:,:,:],
+                '%s/fake_samples_epoch_%03d.png' % (opt.imDir, iteration), nrow=8)
+    if iteration % opt.save_step == 0:
+        # do checkpointing
+        torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.modelsDir, iteration))
