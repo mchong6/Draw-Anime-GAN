@@ -1,6 +1,6 @@
 from __future__ import print_function
 import os
-os.environ["CUDA_VISIBLE_DEVICES"]="0"
+os.environ["CUDA_VISIBLE_DEVICES"]="2"
 import time
 import random
 import argparse
@@ -174,6 +174,8 @@ criterion_MSE = nn.MSELoss()
 input = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
 additive_noise = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
 noise = torch.FloatTensor(opt.batchSize, nz, 1, 1)
+real_embed = torch.FloatTensor(1, 512, 4, 4).fill_(0.)
+fake_embed = torch.FloatTensor(1, 512, 4, 4).fill_(0.)
 if opt.binary:
     bernoulli_prob = torch.FloatTensor(opt.batchSize, nz, 1, 1).fill_(0.5)
     fixed_noise = torch.bernoulli(bernoulli_prob)
@@ -187,6 +189,8 @@ epsilon = torch.FloatTensor([1e-9])
 gamma = .7
 lambda_k = 0.001
 k = 0.
+lambda_c = 0.03
+alpha = 0.6
 
 if opt.cuda:
     netD.cuda()
@@ -195,6 +199,7 @@ if opt.cuda:
     criterion_MSE.cuda()
     input, label, additive_noise = input.cuda(), label.cuda(), additive_noise.cuda()
     noise, fixed_noise, epsilon = noise.cuda(), fixed_noise.cuda(), epsilon.cuda()
+    real_embed, fake_embed = real_embed.cuda(), fake_embed.cuda()
     
 input = Variable(input)
 label = Variable(label)
@@ -202,6 +207,7 @@ additive_noise = Variable(additive_noise)
 noise = Variable(noise)
 fixed_noise = Variable(fixed_noise)
 epsilon = Variable(epsilon)
+real_embed, fake_embed = Variable(real_embed), Variable(fake_embed)
 
 # setup optimizer
 optimizerD = optim.Adam(netD.parameters(), lr = opt.lr, betas = (opt.beta1, 0.999))
@@ -269,16 +275,21 @@ for iteration in range(1, opt.niter+1):
 
     else:
         label.data.fill_(real_label - opt.d_labelSmooth) # use smooth label for discriminator
+        real_embed_ = real_embed.expand(input.size(0), 512,4,4).detach()
+        fake_embed_ = fake_embed.expand(input.size(0), 512,4,4).detach()
+        #fake_embed = fake_embed.detach()
 
         if opt.white_noise:
             additive_noise.data.resize_(input.size()).normal_(0, 0.005)
             input.data.add_(additive_noise.data)
 
-        output = netD(input)
+        output, emb_real = netD(input)
+        center_loss_real = torch.sum((real_embed_ - emb_real)**2)
 
         # Prevent numerical instability
         output = lowerbound(output)
         errD_real = criterion(output, label)
+        errD_real += lambda_c / 2 * center_loss_real
         errD_real.backward()
         D_x = output.data.mean()
         # train with fake
@@ -298,9 +309,11 @@ for iteration in range(1, opt.niter+1):
         else:
             fake = fake_o
 
-        output = netD(fake.detach()) # add ".detach()" to avoid backprop through G
+        output, emb_fake = netD(fake.detach()) # add ".detach()" to avoid backprop through G
+        center_loss_fake = torch.sum((fake_embed_ - emb_fake)**2)
         output = lowerbound(output)
         errD_fake = criterion(output, label)
+        errD_fake += lambda_c / 2 * center_loss_fake
         errD_fake.backward() # gradients for fake/real will be accumulated
         D_G_z1 = output.data.mean()
         errD = errD_real + errD_fake
@@ -312,15 +325,20 @@ for iteration in range(1, opt.niter+1):
             errD += gradient_loss
 
         optimizerD.step() # .step() can be called once the gradients are computed
+        real_embed = real_embed - alpha * torch.sum((real_embed_-emb_real)/opt.batchSize, 0)
+        fake_embed = fake_embed - alpha * torch.sum((fake_embed_-emb_fake)/opt.batchSize, 0)
 
         ############################
         # (2) Update G network: maximize log(D(G(z)))
         ###########################
         netG.zero_grad()
+        fake_o,z_prediction = netG(noise)
         label.data.fill_(real_label) # fake labels are real for generator cost
-        output = netD(fake_o)
+        output, emb_real = netD(fake_o)
+        center_loss = torch.sum((real_embed_.detach() - emb_real)**2)
         output = lowerbound(output)
         errG = criterion(output, label)
+        errG += lambda_c/2 * center_loss
         errG.backward(retain_variables=True) # True if backward through the graph for the second time
         if opt.model == 'IGAN': # with z predictor
             errG_z = criterion_MSE(z_prediction, noise)
@@ -330,9 +348,9 @@ for iteration in range(1, opt.niter+1):
     
         end_iter = time.time()
 
-        print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f Elapsed %.2f s'
-              % (iteration, opt.niter, i, len(dataloader),
-                 errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2, end_iter-start_iter))
+        print('[%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f Elapsed %.2f s, %.4f real:, %.4f fake'
+              % (iteration, opt.niter,
+                 errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2, end_iter-start_iter, center_loss_real.data[0], center_loss_fake.data[0]))
 
     ########### Learning Rate Decay #########
     optimizerD = adjust_learning_rate(optimizerD,iteration)

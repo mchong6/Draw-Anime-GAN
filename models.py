@@ -173,10 +173,15 @@ class _netD_1(nn.Module):
                             nn.LeakyReLU(0.2, inplace=True))
 
 
-        main.add_module('final_layers.conv', nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False))
-        main.add_module('final_layers.sigmoid', nn.Sigmoid())
+        main_2 = nn.Sequential(
+                nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
+                nn.Sigmoid()
+                )
+        #main.add_module('final_layers.conv', nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False))
+        #main.add_module('final_layers.sigmoid', nn.Sigmoid())
         # state size. 1 x 1 x 1
         self.main = main
+        self.main_2 = main_2
 
     def forward(self, input):
         gpu_ids = None
@@ -184,8 +189,9 @@ class _netD_1(nn.Module):
             gpu_ids = range(self.ngpu)
             output = nn.parallel.data_parallel(self.main, input, gpu_ids)
         # Avoid multi-gpu if only using one gpu
-        output = self.main(input)
-        return output.mean(0).view(1)
+        emb = self.main(input)
+        output = self.main_2(emb)
+        return output.mean(0).view(1), emb
         #return output.view(-1, 1)
     
 
