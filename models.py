@@ -37,19 +37,13 @@ class _netG_1(nn.Module):
         #self.nc = nc
         #self.ngf = ngf
         if pix_shuf:
-            self.conv1 = self.upsample_4x(nz, ngf*8*16, 1, 1, 0) #kernel of size 1 because its 1D latent
-            self.conv2 = self.upsample_2x(ngf*8, ngf*4*4, 3, 1, 1)
-            self.conv3 = self.upsample_2x(ngf*4, ngf*2*4, 3, 1, 1)
-            self.conv4 = self.upsample_2x(ngf*2, ngf*4, 3, 1, 1)
-            if imageSize == 128:
-                self.conv_out = nn.Sequential(
-                                self.upsample_2x(ngf, ngf*4, 3, 1, 1),
-                                nn.BatchNorm2d(ngf),
-                                nn.LeakyReLU(0.2, inplace=True),
-                                self.upsample_2x(ngf, nc*4, 3, 1, 1)
-                                )
-            else:
-                self.conv_out = self.upsample_2x(ngf, nc*4, 3, 1, 1)
+            self.conv1 = nn.Conv2d(4, ngf, 4, 2, 1, bias=False)  #64 x 64
+            self.conv2 = nn.Conv2d(ngf, ngf*2, 4, 2, 1, bias=False) # 32 x 32
+            self.conv3 = nn.Conv2d(ngf*2, ngf*4, 4, 2, 1, bias=False) # 16 x 16 
+
+            self.conv4 = self.upsample_2x(ngf*4, ngf*2*4, 3, 1, 1)
+            self.conv5 = self.upsample_2x(ngf*2, ngf*4, 3, 1, 1)
+            self.conv_out = self.upsample_2x(ngf, nc*4, 3, 1, 1)
         else:
             self.conv1 = nn.ConvTranspose2d(nz, ngf * 8, 4, 1, 0, bias=False)
             self.conv2 = nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False)
@@ -68,20 +62,24 @@ class _netG_1(nn.Module):
         self.main = nn.Sequential(
                 # state size. nz x 1 x 1
                 self.conv1,
-                nn.BatchNorm2d(ngf * 8),
+                nn.BatchNorm2d(ngf),
                 nn.LeakyReLU(0.2, inplace=True),
                 # state size. (ngf*8) x 4 x 4
                 self.conv2,
-                nn.BatchNorm2d(ngf * 4),
+                nn.BatchNorm2d(ngf * 2),
                 nn.LeakyReLU(0.2, inplace=True),
                 # state size. (ngf*4) x 8 x 8
                 self.conv3,
-                nn.BatchNorm2d(ngf * 2),
+                nn.BatchNorm2d(ngf * 4),
                 nn.LeakyReLU(0.2, inplace=True),
                 # state size. (ngf*2) x 16 x 16
                 self.conv4,
+                nn.BatchNorm2d(ngf * 2),
+                nn.LeakyReLU(0.2, inplace=True),
+                # state size. (ngf) x 32 x 32
+                self.conv5,
                 nn.BatchNorm2d(ngf),
-                nn.LeakyReLU(0.2, inplace=True)
+                nn.LeakyReLU(0.2, inplace=True),
                 # state size. (ngf) x 32 x 32
                 )
                 

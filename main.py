@@ -44,7 +44,6 @@ parser.add_argument('--n_extra_layers_g', type=int, default=1, help='number of e
 parser.add_argument('--pix_shuf'  , type=int, default=1, help='Use pixel shuffle instead of deconvolution')
 parser.add_argument('--white_noise'  , type=int, default=0, help='Add white noise to inputs of discriminator to stabilize training')
 parser.add_argument('--lambda_'  , type=int, default=10, help='Weight of gradient penalty (DRAGAN)')
-parser.add_argument('--binary', action='store_true', help='z from bernoulli distribution, with prob=0.5')
 parser.add_argument('--lr_decay_every', type=int, default=3000, help='decay lr this many iterations')
 parser.add_argument('--save_step', type=int, default=10000, help='save weights every 50000 iterations ')
 
@@ -148,15 +147,9 @@ loader = iter(dataloader)
 if opt.model == 'DCGAN' or opt.model == 'DRAGAN':
     netG = models._netG_1(ngpu, nz, nc, ngf, n_extra_g, opt.pix_shuf, opt.imageSize)
     netD = models._netD_1(ngpu, nz, nc, ndf, n_extra_d, norm, opt.imageSize)
-elif opt.model == 'IGAN':
-    netG = models._netG_2(ngpu, nz, nc, ngf)
-    netD = models._netD_2(ngpu, nz, nc, ndf)
 elif opt.model == 'RESNET':
     netG = srresnet.NetG(opt.imageSize)
     netD = srresnet.NetD(norm, opt.imageSize)
-elif opt.model == 'BEGAN':
-    netG = models._netG_1(ngpu, nz, nc, ngf, n_extra_g, opt.pix_shuf, opt.imageSize)
-    netD = models.DiscriminatorCNN()
 
 netG.apply(weights_init)
 if opt.netG != '':
@@ -169,16 +162,10 @@ if opt.netD != '':
 print(netD)
 
 criterion = nn.BCELoss()
-criterion_MSE = nn.MSELoss()
 
 input = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
+noise = torch.FloatTensor(opt.batchSize, 1, opt.imageSize, opt.imageSize)
 additive_noise = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
-noise = torch.FloatTensor(opt.batchSize, nz, 1, 1)
-if opt.binary:
-    bernoulli_prob = torch.FloatTensor(opt.batchSize, nz, 1, 1).fill_(0.5)
-    fixed_noise = torch.bernoulli(bernoulli_prob)
-else:
-    fixed_noise = torch.FloatTensor(opt.batchSize, nz, 1, 1).normal_(0, 1)
 label = torch.FloatTensor([1])
 real_label = 1
 fake_label = 0
@@ -192,16 +179,14 @@ if opt.cuda:
     netD.cuda()
     netG.cuda()
     criterion.cuda()
-    criterion_MSE.cuda()
     input, label, additive_noise = input.cuda(), label.cuda(), additive_noise.cuda()
-    noise, fixed_noise, epsilon = noise.cuda(), fixed_noise.cuda(), epsilon.cuda()
+    noise, epsilon = noise.cuda(), epsilon.cuda()
     
 input = Variable(input)
 label = Variable(label)
 additive_noise = Variable(additive_noise)
-noise = Variable(noise)
-fixed_noise = Variable(fixed_noise)
 epsilon = Variable(epsilon)
+noise = Variable(noise)
 
 # setup optimizer
 optimizerD = optim.Adam(netD.parameters(), lr = opt.lr, betas = (opt.beta1, 0.999))
@@ -230,109 +215,68 @@ for iteration in range(1, opt.niter+1):
     real_cpu, _ = data
     batchSize = real_cpu.size(0)
     input.data.resize_(real_cpu.size()).copy_(real_cpu)
+    noise.data.resize_(input.size(0), 1, opt.imageSize, opt.imageSize)
+    noise.data.normal_(0, 1)
 
-    if opt.model == 'BEGAN':
-        noise.data.resize_(batchSize, nz, 1, 1)
-        if opt.binary:
-            bernoulli_prob.resize_(noise.data.size())
-            noise.data.copy_(2*(torch.bernoulli(bernoulli_prob)-0.5))
-        else:
-            noise.data.normal_(0, 1)
+    label.data.fill_(real_label - opt.d_labelSmooth) # use smooth label for discriminator
 
-        fake, _ = netG(noise)
-        fake_recon = netD(fake.detach())
-        real_recon = netD(input)
+    if opt.white_noise:
+        additive_noise.data.resize_(input.size()).normal_(0, 0.005)
+        input.data.add_(additive_noise.data)
 
-        err_real = torch.mean(torch.abs(real_recon - input))
-        err_fake = torch.mean(torch.abs(fake_recon - fake))
+    output = netD(input)
 
-        errD = err_real - k*err_fake
-        errD.backward()
-        optimizerD.step()
+    # Prevent numerical instability
+    output = lowerbound(output)
+    errD_real = criterion(output, label)
+    errD_real.backward()
+    D_x = output.data.mean()
+    # train with fake
+    # shuffle input so we dont match exactly with output
+    input = torch.cat((input[torch.randperm(input.size(0)).cuda()], noise), 1)
+    fake_o,z_prediction = netG(input)
+    label.data.fill_(fake_label)
 
-        netG.zero_grad()
-        fake, _ = netG(noise)
-        fake_recons = netD(fake)
-        errG = torch.mean(torch.abs(fake_recons-fake))
-        errG.backward()
-        optimizerG.step()
-
-        balance = (gamma * err_real - err_fake).data[0]
-        k = min(max(k + lambda_k * balance,0),1)
-        measure = err_real.data[0] + np.abs(balance)
-
-        end_iter = time.time()
-        ########### Logging #########
-        print('[%d/%d] Loss_D: %.4f Loss_G: %.4f Measure: %.4f K: %.4f LR: %.8f'
-                  % (iteration, opt.niter, 
-                     errD.data[0], errG.data[0], measure, k, optimizerD.param_groups[0]['lr']))
-
+    if opt.white_noise:
+        additive_noise.data.normal_(0, 0.005)
+        fake = fake_o + additive_noise
+        #fake.data.add_(additive_noise.data)
     else:
-        label.data.fill_(real_label - opt.d_labelSmooth) # use smooth label for discriminator
+        fake = fake_o
 
-        if opt.white_noise:
-            additive_noise.data.resize_(input.size()).normal_(0, 0.005)
-            input.data.add_(additive_noise.data)
+    output = netD(fake.detach()) # add ".detach()" to avoid backprop through G
+    output = lowerbound(output)
+    errD_fake = criterion(output, label)
+    errD_fake.backward() # gradients for fake/real will be accumulated
+    D_G_z1 = output.data.mean()
+    errD = errD_real + errD_fake
 
-        output = netD(input)
+    # Gradient penalty for DRAGAN
+    if opt.model == 'DRAGAN': #or opt.model == 'RESNET':
+        gradient_loss = calc_gradient_penalty_DRAGAN(netD, input)
+        gradient_loss.backward()
+        errD += gradient_loss
 
-        # Prevent numerical instability
-        output = lowerbound(output)
-        errD_real = criterion(output, label)
-        errD_real.backward()
-        D_x = output.data.mean()
-        # train with fake
-        noise.data.resize_(batchSize, nz, 1, 1)
-        if opt.binary:
-            bernoulli_prob.resize_(noise.data.size())
-            noise.data.copy_(2*(torch.bernoulli(bernoulli_prob)-0.5))
-        else:
-            noise.data.normal_(0, 1)
-        fake_o,z_prediction = netG(noise)
-        label.data.fill_(fake_label)
+    optimizerD.step() # .step() can be called once the gradients are computed
 
-        if opt.white_noise:
-            additive_noise.data.normal_(0, 0.005)
-            fake = fake_o + additive_noise
-            #fake.data.add_(additive_noise.data)
-        else:
-            fake = fake_o
+    ############################
+    # (2) Update G network: maximize log(D(G(z)))
+    ###########################
+    netG.zero_grad()
+    fake_o,z_prediction = netG(input)
+    label.data.fill_(real_label) # fake labels are real for generator cost
+    output = netD(fake_o)
+    output = lowerbound(output)
+    errG = criterion(output, label)
+    errG.backward() # True if backward through the graph for the second time
+    D_G_z2 = output.data.mean()
+    optimizerG.step()
 
-        output = netD(fake.detach()) # add ".detach()" to avoid backprop through G
-        output = lowerbound(output)
-        errD_fake = criterion(output, label)
-        errD_fake.backward() # gradients for fake/real will be accumulated
-        D_G_z1 = output.data.mean()
-        errD = errD_real + errD_fake
+    end_iter = time.time()
 
-        # Gradient penalty for DRAGAN
-        if opt.model == 'DRAGAN': #or opt.model == 'RESNET':
-            gradient_loss = calc_gradient_penalty_DRAGAN(netD, input)
-            gradient_loss.backward()
-            errD += gradient_loss
-
-        optimizerD.step() # .step() can be called once the gradients are computed
-
-        ############################
-        # (2) Update G network: maximize log(D(G(z)))
-        ###########################
-        netG.zero_grad()
-        label.data.fill_(real_label) # fake labels are real for generator cost
-        output = netD(fake_o)
-        output = lowerbound(output)
-        errG = criterion(output, label)
-        errG.backward(retain_variables=True) # True if backward through the graph for the second time
-        if opt.model == 'IGAN': # with z predictor
-            errG_z = criterion_MSE(z_prediction, noise)
-            errG_z.backward()
-        D_G_z2 = output.data.mean()
-        optimizerG.step()
-    
-        end_iter = time.time()
-
-        print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f Elapsed %.2f s'
-              % (iteration, opt.niter, i, len(dataloader),
-                 errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2, end_iter-start_iter))
+    print('[%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f Elapsed %.2f s'
+          % (iteration, opt.niter,
+             errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2, end_iter-start_iter))
 
     ########### Learning Rate Decay #########
     optimizerD = adjust_learning_rate(optimizerD,iteration)
@@ -341,9 +285,9 @@ for iteration in range(1, opt.niter+1):
 
     if iteration % 500 == 0:
         # the first 64 samples from the mini-batch are saved.
-        #vutils.save_image(real_cpu[0:64,:,:,:],
-        #        '%s/real_samples_%03d_%04d.png' % (opt.imDir, epoch, i), nrow=8)
-        fake,_ = netG(noise)
+        vutils.save_image(real_cpu[0:64,:,:,:],
+                '%s/real_samples_%03d.png' % (opt.imDir, iteration), nrow=8)
+        fake,_ = netG(input)
         vutils.save_image(fake.data[0:64,:,:,:],
                 '%s/fake_samples_epoch_%03d.png' % (opt.imDir, iteration), nrow=8)
     if iteration % opt.save_step == 0:
