@@ -2,6 +2,101 @@ import torch
 import torch.nn as nn
 import torch.nn.parallel
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.autograd import Variable
+import torchvision.models as models
+
+
+#resnet = models.resnet101()
+resnet = models.densenet161()
+class resVAE(nn.Module):
+    #define layers
+    def __init__(self, hidden_size=64):
+        super(resVAE, self).__init__()
+        self.hidden_size = hidden_size
+        #self.features = nn.Sequential(
+        #            resnet.conv1, 
+        #            resnet.bn1, 
+        #            resnet.relu, 
+        #            resnet.maxpool, 
+        #            resnet.layer1,
+        #            resnet.layer2,
+        #            nn.AdaptiveAvgPool2d(1),
+        #        ) 
+        self.features = nn.Sequential(*list(resnet.features.children())[:-1])
+        self.pool = nn.AvgPool2d (4)
+        self.linear = nn.Linear(2208, self.hidden_size*2, bias=False)
+
+
+    def encoder(self, x):
+        x = self.features(x)
+        x = self.pool(x)
+        x = x.view(-1, 2208)
+        x = self.linear(x)
+        mu = x[..., :self.hidden_size]
+        logvar = x[..., self.hidden_size:]
+        return mu, logvar
+
+      
+    #define forward pass
+    def forward(self, im):
+        mu, logvar = self.encoder(im)
+        #stddev = torch.sqrt(torch.exp(logvar))
+        #eps = Variable(torch.randn(stddev.size()).normal_()).cuda()
+        #z = torch.add(mu, torch.mul(eps, stddev))
+        return mu, logvar
+
+class VAE(nn.Module):
+  
+    #define layers
+    def __init__(self, hidden_size=64):
+        super(VAE, self).__init__()
+        self.hidden_size = hidden_size
+
+        #Encoder layers
+        self.enc_conv1 = nn.Conv2d(3, 128, 5, stride=2, padding=2, bias=False)
+        self.enc_bn1 = nn.BatchNorm2d(128)
+        self.enc_conv2 = nn.Conv2d(128, 256, 5, stride=2, padding=2, bias=False)
+        self.enc_bn2 = nn.BatchNorm2d(256)
+        self.enc_conv3 = nn.Conv2d(256, 512, 5, stride=2, padding=2, bias=False)
+        self.enc_bn3 = nn.BatchNorm2d(512)
+        self.enc_conv4 = nn.Conv2d(512, 1024, 3, stride=2, padding=1, bias=False)
+        self.enc_bn4 = nn.BatchNorm2d(1024)
+        self.enc_conv5 = nn.Conv2d(1024, 2048, 3, stride=2, padding=1, bias=False)
+        self.enc_bn5 = nn.BatchNorm2d(2048)
+        self.enc_fc1 = nn.Linear(4*4*2048, self.hidden_size*2, bias=False)
+        self.enc_dropout1 = nn.Dropout(p=.7)
+
+
+    def encoder(self, x):
+        x = F.relu(self.enc_conv1(x))
+        x = self.enc_bn1(x)
+        x = F.relu(self.enc_conv2(x))
+        x = self.enc_bn2(x)
+        x = F.relu(self.enc_conv3(x))
+        x = self.enc_bn3(x)
+        x = F.relu(self.enc_conv4(x))
+        x = self.enc_bn4(x)
+        x = F.relu(self.enc_conv5(x))
+        x = self.enc_bn5(x)
+        x = x.view(-1, 4*4*2048)
+        #x = self.enc_dropout1(x)
+        x = self.enc_fc1(x)
+        mu = x[..., :self.hidden_size]
+        logvar = x[..., self.hidden_size:]
+        return mu, logvar
+
+      
+    #define forward pass
+    def forward(self, im):
+        mu, logvar = self.encoder(im)
+        #stddev = torch.sqrt(torch.exp(logvar))
+        #eps = Variable(torch.randn(stddev.size()).normal_()).cuda()
+        #z = torch.add(mu, torch.mul(eps, stddev))
+        return mu, logvar
 
 class LayerNormalization(nn.Module):
     def __init__(self, hidden_size, eps=1e-5):
@@ -37,13 +132,19 @@ class _netG_1(nn.Module):
         #self.nc = nc
         #self.ngf = ngf
         if pix_shuf:
-            self.conv1 = nn.Conv2d(4, ngf, 4, 2, 1, bias=False)  #64 x 64
-            self.conv2 = nn.Conv2d(ngf, ngf*2, 4, 2, 1, bias=False) # 32 x 32
-            self.conv3 = nn.Conv2d(ngf*2, ngf*4, 4, 2, 1, bias=False) # 16 x 16 
-
-            self.conv4 = self.upsample_2x(ngf*4, ngf*2*4, 3, 1, 1)
-            self.conv5 = self.upsample_2x(ngf*2, ngf*4, 3, 1, 1)
-            self.conv_out = self.upsample_2x(ngf, nc*4, 3, 1, 1)
+            self.conv1 = self.upsample_4x(nz, ngf*8*16, 1, 1, 0) #kernel of size 1 because its 1D latent
+            self.conv2 = self.upsample_2x(ngf*8, ngf*4*4, 3, 1, 1)
+            self.conv3 = self.upsample_2x(ngf*4, ngf*2*4, 3, 1, 1)
+            self.conv4 = self.upsample_2x(ngf*2, ngf*4, 3, 1, 1)
+            if imageSize == 128:
+                self.conv_out = nn.Sequential(
+                                self.upsample_2x(ngf, ngf*4, 3, 1, 1),
+                                nn.BatchNorm2d(ngf),
+                                nn.LeakyReLU(0.2, inplace=True),
+                                self.upsample_2x(ngf, nc*4, 3, 1, 1)
+                                )
+            else:
+                self.conv_out = self.upsample_2x(ngf, nc*4, 3, 1, 1)
         else:
             self.conv1 = nn.ConvTranspose2d(nz, ngf * 8, 4, 1, 0, bias=False)
             self.conv2 = nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False)
@@ -62,24 +163,20 @@ class _netG_1(nn.Module):
         self.main = nn.Sequential(
                 # state size. nz x 1 x 1
                 self.conv1,
-                nn.BatchNorm2d(ngf),
+                nn.BatchNorm2d(ngf * 8),
                 nn.LeakyReLU(0.2, inplace=True),
                 # state size. (ngf*8) x 4 x 4
                 self.conv2,
-                nn.BatchNorm2d(ngf * 2),
+                nn.BatchNorm2d(ngf * 4),
                 nn.LeakyReLU(0.2, inplace=True),
                 # state size. (ngf*4) x 8 x 8
                 self.conv3,
-                nn.BatchNorm2d(ngf * 4),
+                nn.BatchNorm2d(ngf * 2),
                 nn.LeakyReLU(0.2, inplace=True),
                 # state size. (ngf*2) x 16 x 16
                 self.conv4,
-                nn.BatchNorm2d(ngf * 2),
-                nn.LeakyReLU(0.2, inplace=True),
-                # state size. (ngf) x 32 x 32
-                self.conv5,
                 nn.BatchNorm2d(ngf),
-                nn.LeakyReLU(0.2, inplace=True),
+                nn.LeakyReLU(0.2, inplace=True)
                 # state size. (ngf) x 32 x 32
                 )
                 
@@ -113,6 +210,7 @@ class _netG_1(nn.Module):
         if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
             gpu_ids = range(self.ngpu)
         return nn.parallel.data_parallel(self.main, input, gpu_ids), 0
+
 
 class _netD_1(nn.Module):
     def __init__(self, ngpu, nz, nc, ndf,  n_extra_layers_d, norm, imageSize):
