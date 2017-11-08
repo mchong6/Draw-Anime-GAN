@@ -1,6 +1,6 @@
 from __future__ import print_function
 import os
-os.environ["CUDA_VISIBLE_DEVICES"]="0"
+os.environ["CUDA_VISIBLE_DEVICES"]="3"
 import time
 import random
 import argparse
@@ -13,6 +13,7 @@ import torch.utils.data
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
+from torch import autograd
 from torch.autograd import Variable, grad
 import numpy as np
 
@@ -35,6 +36,7 @@ parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. de
 parser.add_argument('--cuda'  , type=int, default=1, help='enables cuda')
 parser.add_argument('--ngpu'  , type=int, default=1, help='number of GPUs to use')
 parser.add_argument('--netG', default='', help="path to netG (to continue training)")
+parser.add_argument('--netENC', default='', help="path to netG (to continue training)")
 parser.add_argument('--netD', default='', help="path to netD (to continue training)")
 parser.add_argument('--outDir', required=True, help='folder to output images and model checkpoints')
 parser.add_argument('--model', required=True, help='DCGAN | RESNET | IGAN | DRAGAN | BEGAN')
@@ -110,6 +112,34 @@ def adjust_learning_rate(optimizer, niter):
         param_group['lr'] = lr
     return optimizer
 
+def scale_learning_rate(optimizer, niter, target):
+    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
+    if niter > target:
+        return adjust_learning_rate(optimizer, niter)
+    else:
+        lr = niter / target * opt.lr
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+        return optimizer
+
+def calc_gradient_penalty(netD, real_data, fake_data, BATCH_SIZE):
+    alpha = torch.rand(BATCH_SIZE, 1)
+    alpha = alpha.expand(BATCH_SIZE, real_data.nelement()/BATCH_SIZE).contiguous().view(BATCH_SIZE, 3, opt.imageSize, opt.imageSize)
+    alpha = alpha.cuda()
+
+    interpolates = (alpha * real_data + ((1 - alpha) * fake_data)).cuda()
+    interpolates = autograd.Variable(interpolates, requires_grad=True)
+
+
+    disc_interpolates = netD(interpolates)
+
+    gradients = autograd.grad(outputs=disc_interpolates, inputs=interpolates,
+                              grad_outputs=torch.ones(disc_interpolates.size()).cuda(),
+                              create_graph=True, retain_graph=True, only_inputs=True)[0]
+
+    gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * opt.lambda_
+    return gradient_penalty
+
 def calc_gradient_penalty_DRAGAN(netD, X):
     alpha = torch.rand(X.size(0), 1, 1, 1)
     alpha = alpha.expand(X.size()).cuda()
@@ -124,8 +154,7 @@ def calc_gradient_penalty_DRAGAN(netD, X):
     return gradient_penalty
 
 def lowerbound(input):
-    output = torch.cat([input, epsilon], 0)
-    output = torch.max(output)
+    output = torch.max(input, epsilon)
     return output
 
 def vae_loss(mu, logvar, pred, gt, batch_size): 
@@ -133,10 +162,15 @@ def vae_loss(mu, logvar, pred, gt, batch_size):
     kl_loss /= (batch_size * opt.nz)
     #kl_element = torch.add(torch.add(torch.add(mu.pow(2), logvar.exp()), -1), logvar.mul(-1))
     #kl_loss = torch.sum(kl_element).mul(.5)
-    recon_loss = torch.sum(torch.abs(pred - gt))
-    #recon_loss = torch.sum((pred-gt).pow(2))
+    #recon_loss = torch.sum(torch.abs(pred - gt))
+    recon_loss = torch.sum((pred-gt).pow(2))
     return kl_loss+recon_loss*1e-4
 
+def test():
+    z = Variable(torch.randn(64, opt.nz, 1, 1)).cuda()
+    output, _ = netG(z)
+    vutils.save_image(output.data[0:64,:,:,:],
+            '%s/sample.png' % (opt.imDir), nrow=8)
 
     
 nc = 3
@@ -177,7 +211,12 @@ print(netG)
 netD.apply(weights_init)
 if opt.netD != '':
     netD.load_state_dict(torch.load(opt.netD))
+
+netENC.apply(weights_init)
+if opt.netENC != '':
+    netENC.load_state_dict(torch.load(opt.netENC))
 print(netD)
+
 print(netENC)
 
 criterion = nn.BCELoss()
@@ -188,11 +227,13 @@ additive_noise = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSiz
 label = torch.FloatTensor([1])
 real_label = 1
 fake_label = 0
-epsilon = torch.FloatTensor([1e-9])
+epsilon = torch.FloatTensor([1e-8])
 #BEGAN parameters
 gamma = .7
 lambda_k = 0.001
 k = 0.
+one = torch.FloatTensor([1])
+mone = one * -1
 
 if opt.cuda:
     netD.cuda()
@@ -201,6 +242,7 @@ if opt.cuda:
     criterion.cuda()
     input, label, additive_noise = input.cuda(), label.cuda(), additive_noise.cuda()
     noise, epsilon = noise.cuda(), epsilon.cuda()
+    one, mone = one.cuda(), mone.cuda()
     
 input = Variable(input)
 label = Variable(label)
@@ -213,22 +255,7 @@ optimizerD = optim.Adam(netD.parameters(), lr = opt.lr, betas = (opt.beta1, 0.99
 optimizerG = optim.Adam(netG.parameters(), lr = opt.lr, betas = (opt.beta1, 0.999))
 optimizerENC = optim.Adam(netENC.parameters(), lr = opt.lr, betas = (opt.beta1, 0.999))
 
-
-for iteration in range(1, opt.niter+1):
-    try: 
-        data = loader.next()
-    except StopIteration:
-        loader = iter(dataloader)
-        data = loader.next()
-
-    start_iter = time.time()
-    real_cpu, _ = data
-    batchSize = real_cpu.size(0)
-    input.data.resize_(real_cpu.size()).copy_(real_cpu)
-
-    ############################
-    ######## Train VAE #########
-    ############################
+def trainVAE(input, batchSize):
     netENC.zero_grad()
     netG.zero_grad()
 
@@ -241,71 +268,77 @@ for iteration in range(1, opt.niter+1):
     recon, _ = netG(latent)
     loss = 1e-1 * vae_loss(mu, logvar, input, recon, batchSize)
     loss.backward()
+    return loss, recon
+
+for iteration in range(1, opt.niter+1):
+    start_iter = time.time()
+    ########### Learning Rate Decay #########
+    optimizerD = adjust_learning_rate(optimizerD,iteration)
+    optimizerG = scale_learning_rate(optimizerG,iteration,target=100)
+    #optimizerG = adjust_learning_rate(optimizerG,iteration)
+    try: 
+        data = loader.next()
+    except StopIteration:
+        loader = iter(dataloader)
+        data = loader.next()
+
+    real_cpu, _ = data
+    batchSize = real_cpu.size(0)
+    input.data.resize_(real_cpu.size()).copy_(real_cpu)
+
+    loss, recon = trainVAE(input, batchSize)
+
+    # train with real
+    netD.zero_grad()
+    noise.data.resize_(batchSize, nz, 1, 1)
+    noise.data.normal_(0, 1)
+    label.data.fill_(real_label)
+
+    if opt.white_noise:
+        additive_noise.data.resize_(input.size()).normal_(0, 0.005)
+        input.data.add_(additive_noise.data)
+
+    D_real = netD(input)
+    D_real_loss = criterion(lowerbound(D_real), label)
+    D_real_loss.backward()
+
+    # train with fake
+    fake, z_prediction = netG(noise)
+    label.data.fill_(fake_label)
+
+    if opt.white_noise:
+        additive_noise.data.normal_(0, 0.005)
+        fake = fake + additive_noise
+        #fake.data.add_(additive_noise.data)
+
+    D_fake = netD(fake.detach()) # add ".detach()" to avoid backprop through G
+    D_fake_loss = criterion(lowerbound(D_fake), label)
+    D_fake_loss.backward()
+    D_loss = D_real_loss + D_fake_loss
+
+    gradient_loss = calc_gradient_penalty_DRAGAN(netD, input)
+    gradient_loss.backward()
+    D_loss += gradient_loss
+    optimizerD.step() # .step() can be called once the gradients are computed
+
+    ############################
+    # (2) Update G network: maximize log(D(G(z)))
+    ###########################
+    netG.zero_grad()
+    label.data.fill_(real_label)
+    noise.data.normal_(0, 1)
+    D_fake = netD(fake)
+    G_loss = criterion(lowerbound(D_fake), label)
+    G_loss.backward()
     optimizerG.step()
     optimizerENC.step()
-
-    ############################
-    # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
-    ###########################
-    # train with real
-    #netD.zero_grad()
-    #noise.data.resize_(batchSize, nz, 1, 1)
-    #noise.data.normal_(0, 1)
-
-    #label.data.fill_(real_label - opt.d_labelSmooth) # use smooth label for discriminator
-
-    #if opt.white_noise:
-    #    additive_noise.data.resize_(input.size()).normal_(0, 0.005)
-    #    input.data.add_(additive_noise.data)
-
-    #output = netD(input)
-
-    ## Prevent numerical instability
-    #output = lowerbound(output)
-    #errD_real = criterion(output, label)
-    #errD_real.backward()
-    #D_x = output.data.mean()
-    ## train with fake
-    #fake_o,z_prediction = netG(noise)
-    #label.data.fill_(fake_label)
-
-    #if opt.white_noise:
-    #    additive_noise.data.normal_(0, 0.005)
-    #    fake = fake_o + additive_noise
-    #    #fake.data.add_(additive_noise.data)
-    #else:
-    #    fake = fake_o
-
-    #output = netD(fake.detach()) # add ".detach()" to avoid backprop through G
-    #output = lowerbound(output)
-    #errD_fake = criterion(output, label)
-    #errD_fake.backward() # gradients for fake/real will be accumulated
-    #D_G_z1 = output.data.mean()
-    #errD = errD_real + errD_fake
-    #optimizerD.step() # .step() can be called once the gradients are computed
-
-    #############################
-    ## (2) Update G network: maximize log(D(G(z)))
-    ############################
-    #netG.zero_grad()
-    #label.data.fill_(real_label) # fake labels are real for generator cost
-    #output = netD(fake_o)
-    #output = lowerbound(output)
-    #errG = criterion(output, label)
-    #errG.backward() # True if backward through the graph for the second time
-    #D_G_z2 = output.data.mean()
-    #optimizerG.step()
 
     end_iter = time.time()
 
     #print('[%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f VAE: %.4f Elapsed %.2f s'
     #    % (iteration, opt.niter,
     #    errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2, loss.data[0], end_iter-start_iter))
-    print(iteration, loss.data[0])
-
-    ########### Learning Rate Decay #########
-    optimizerD = adjust_learning_rate(optimizerD,iteration)
-    optimizerG = adjust_learning_rate(optimizerG,iteration)
+    print(iteration, D_loss.data[0], G_loss.data[0], loss.data[0])
 
 
     if iteration % 500 == 0:
@@ -314,10 +347,11 @@ for iteration in range(1, opt.niter+1):
                 '%s/real_samples_%03d.png' % (opt.imDir, iteration), nrow=8)
         vutils.save_image(recon.data[0:64,:,:,:],
                 '%s/recon_samples_epoch_%03d.png' % (opt.imDir, iteration), nrow=8)
-        #fake,_ = netG(noise)
-        #vutils.save_image(fake.data[0:64,:,:,:],
-        #        '%s/fake_samples_epoch_%03d.png' % (opt.imDir, iteration), nrow=8)
+        fake,_ = netG(noise)
+        vutils.save_image(fake.data[0:64,:,:,:],
+                '%s/fake_samples_epoch_%03d.png' % (opt.imDir, iteration), nrow=8)
     if iteration % opt.save_step == 0:
         # do checkpointing
-        torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.modelsDir, iteration))
+        torch.save(netG.state_dict(), '%s/netG_2_epoch_%d.pth' % (opt.modelsDir, iteration))
+        torch.save(netD.state_dict(), '%s/netD_epoch_%d.pth' % (opt.modelsDir, iteration))
         torch.save(netENC.state_dict(), '%s/netENC_epoch_%d.pth' % (opt.modelsDir, iteration))

@@ -29,12 +29,14 @@ class resVAE(nn.Module):
         self.features = nn.Sequential(*list(resnet.features.children())[:-1])
         self.pool = nn.AvgPool2d (4)
         self.linear = nn.Linear(2208, self.hidden_size*2, bias=False)
+        self.drop = nn.Dropout(p=.7)
 
 
     def encoder(self, x):
         x = self.features(x)
         x = self.pool(x)
         x = x.view(-1, 2208)
+        x = self.drop(x)
         x = self.linear(x)
         mu = x[..., :self.hidden_size]
         logvar = x[..., self.hidden_size:]
@@ -83,7 +85,7 @@ class VAE(nn.Module):
         x = F.relu(self.enc_conv5(x))
         x = self.enc_bn5(x)
         x = x.view(-1, 4*4*2048)
-        #x = self.enc_dropout1(x)
+        x = self.enc_dropout1(x)
         x = self.enc_fc1(x)
         mu = x[..., :self.hidden_size]
         logvar = x[..., self.hidden_size:]
