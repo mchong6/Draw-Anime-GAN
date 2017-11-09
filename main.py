@@ -1,6 +1,6 @@
 from __future__ import print_function
 import os
-os.environ["CUDA_VISIBLE_DEVICES"]="0"
+os.environ["CUDA_VISIBLE_DEVICES"]="2"
 import time
 import random
 import argparse
@@ -22,7 +22,7 @@ import srresnet
 from models import weights_init
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataRoot', default='./celeb', help='path to dataset')
+parser.add_argument('--dataRoot', default='./data', help='path to dataset')
 parser.add_argument('--workers', type=int, default=12, help='number of data loading workers')
 parser.add_argument('--batchSize', type=int, default=64, help='input batch size')
 parser.add_argument('--imageSize', type=int, default=128, help='the height / width of the input image to network')
@@ -34,15 +34,17 @@ parser.add_argument('--lr', type=float, default=0.0001, help='learning rate, def
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
 parser.add_argument('--cuda'  , type=int, default=1, help='enables cuda')
 parser.add_argument('--ngpu'  , type=int, default=1, help='number of GPUs to use')
+parser.add_argument('--netENC', default='', help="path to netG (to continue training)")
 parser.add_argument('--netG', default='', help="path to netG (to continue training)")
 parser.add_argument('--netD', default='', help="path to netD (to continue training)")
+parser.add_argument('--netD_patch', default='', help="path to netD (to continue training)")
 parser.add_argument('--outDir', required=True, help='folder to output images and model checkpoints')
 parser.add_argument('--model', required=True, help='DCGAN | RESNET | IGAN | DRAGAN | BEGAN')
 parser.add_argument('--d_labelSmooth', type=float, default=0.1, help='for D, use soft label "1-labelSmooth" for real samples')
 parser.add_argument('--n_extra_layers_d', type=int, default=0, help='number of extra conv layers in D')
 parser.add_argument('--n_extra_layers_g', type=int, default=1, help='number of extra conv layers in G')
 parser.add_argument('--pix_shuf'  , type=int, default=1, help='Use pixel shuffle instead of deconvolution')
-parser.add_argument('--white_noise'  , type=int, default=1, help='Add white noise to inputs of discriminator to stabilize training')
+parser.add_argument('--white_noise'  , type=int, default=0, help='Add white noise to inputs of discriminator to stabilize training')
 parser.add_argument('--lambda_'  , type=int, default=10, help='Weight of gradient penalty (DRAGAN)')
 parser.add_argument('--lr_decay_every', type=int, default=3000, help='decay lr this many iterations')
 parser.add_argument('--save_step', type=int, default=10000, help='save weights every 50000 iterations ')
@@ -75,7 +77,7 @@ opt = parser.parse_args()
 print(opt)
 if opt.model == 'DRAGAN' or opt.model == 'RESNET':
     #norm = 'LayerNorm'
-    norm = 'LayerNorm'
+    norm = 'BatchNorm'
 else:
     norm = 'BatchNorm'
 
@@ -124,9 +126,7 @@ def calc_gradient_penalty_DRAGAN(netD, X):
     return gradient_penalty
 
 def lowerbound(input):
-    output = torch.cat([input, epsilon], 0)
-    output = torch.max(output)
-    return output
+    return torch.max(input, epsilon)
 
 def vae_loss(mu, logvar, pred, gt, batch_size): 
     kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
@@ -164,7 +164,7 @@ loader = iter(dataloader)
 if opt.model == 'DCGAN' or opt.model == 'DRAGAN':
     netG = models._netG_1(ngpu, nz, nc, ngf, n_extra_g, opt.pix_shuf, opt.imageSize)
     netD = models._netD_1(ngpu, nz, nc, ndf, n_extra_d, norm, opt.imageSize)
-    netENC = models.resVAE(opt.nz)
+    netD_patch = models.patchD(ngpu, nz, nc, ndf, n_extra_d, norm, opt.imageSize)
 elif opt.model == 'RESNET':
     netG = srresnet.NetG(opt.imageSize)
     netD = srresnet.NetD(norm, opt.imageSize)
@@ -178,8 +178,11 @@ netD.apply(weights_init)
 if opt.netD != '':
     netD.load_state_dict(torch.load(opt.netD))
 print(netD)
-print(netENC)
 
+netD_patch.apply(weights_init)
+if opt.netD_patch != '':
+    netD_patch.load_state_dict(torch.load(opt.netD_patch))
+print(netD_patch)
 criterion = nn.BCELoss()
 
 input = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
@@ -196,8 +199,8 @@ k = 0.
 
 if opt.cuda:
     netD.cuda()
+    netD_patch.cuda()
     netG.cuda()
-    netENC.cuda()
     criterion.cuda()
     input, label, additive_noise = input.cuda(), label.cuda(), additive_noise.cuda()
     noise, epsilon = noise.cuda(), epsilon.cuda()
@@ -210,8 +213,8 @@ noise = Variable(noise)
 
 # setup optimizer
 optimizerD = optim.Adam(netD.parameters(), lr = opt.lr, betas = (opt.beta1, 0.999))
+optimizerD_patch = optim.Adam(netD_patch.parameters(), lr = opt.lr, betas = (opt.beta1, 0.999))
 optimizerG = optim.Adam(netG.parameters(), lr = opt.lr, betas = (opt.beta1, 0.999))
-optimizerENC = optim.Adam(netENC.parameters(), lr = opt.lr, betas = (opt.beta1, 0.999))
 
 
 for iteration in range(1, opt.niter+1):
@@ -225,99 +228,91 @@ for iteration in range(1, opt.niter+1):
     real_cpu, _ = data
     batchSize = real_cpu.size(0)
     input.data.resize_(real_cpu.size()).copy_(real_cpu)
-
-    ############################
-    ######## Train VAE #########
-    ############################
-    netENC.zero_grad()
-    netG.zero_grad()
-
-    mu, logvar = netENC(input)
-    # calculate latent variable
-    stddev = torch.sqrt(torch.exp(logvar))
-    eps = Variable(torch.randn(stddev.size()).normal_()).cuda()
-    latent = torch.add(mu, torch.mul(eps, stddev))
-    latent = latent.view(-1, nz, 1, 1)
-    recon, _ = netG(latent)
-    loss = 1e-1 * vae_loss(mu, logvar, input, recon, batchSize)
-    loss.backward()
-    optimizerG.step()
-    optimizerENC.step()
-
     ############################
     # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
     ###########################
     # train with real
-    #netD.zero_grad()
-    #noise.data.resize_(batchSize, nz, 1, 1)
-    #noise.data.normal_(0, 1)
+    netD.zero_grad()
+    netD_patch.zero_grad()
+    noise.data.resize_(batchSize, nz, 1, 1)
+    noise.data.normal_(0, 1)
 
-    #label.data.fill_(real_label - opt.d_labelSmooth) # use smooth label for discriminator
+    label.data.fill_(real_label - opt.d_labelSmooth) # use smooth label for discriminator
 
-    #if opt.white_noise:
-    #    additive_noise.data.resize_(input.size()).normal_(0, 0.005)
-    #    input.data.add_(additive_noise.data)
+    if opt.white_noise:
+        additive_noise.data.resize_(input.size()).normal_(0, 0.005)
+        input.data.add_(additive_noise.data)
 
-    #output = netD(input)
+    output = netD(input)
+    output_patch = netD_patch(input)
 
-    ## Prevent numerical instability
-    #output = lowerbound(output)
-    #errD_real = criterion(output, label)
-    #errD_real.backward()
-    #D_x = output.data.mean()
-    ## train with fake
-    #fake_o,z_prediction = netG(noise)
-    #label.data.fill_(fake_label)
+    # Prevent numerical instability
+    errD_real = criterion(lowerbound(output), label)
+    errD_real.backward()
+    errD_patch_real = criterion(lowerbound(output_patch), label)
+    errD_patch_real.backward()
+    D_x = output.data.mean()
+    # train with fake
+    fake_o,z_prediction = netG(noise)
+    label.data.fill_(fake_label)
 
-    #if opt.white_noise:
-    #    additive_noise.data.normal_(0, 0.005)
-    #    fake = fake_o + additive_noise
-    #    #fake.data.add_(additive_noise.data)
-    #else:
-    #    fake = fake_o
+    if opt.white_noise:
+        additive_noise.data.normal_(0, 0.005)
+        fake = fake_o + additive_noise
+        #fake.data.add_(additive_noise.data)
+    else:
+        fake = fake_o
 
-    #output = netD(fake.detach()) # add ".detach()" to avoid backprop through G
-    #output = lowerbound(output)
-    #errD_fake = criterion(output, label)
-    #errD_fake.backward() # gradients for fake/real will be accumulated
-    #D_G_z1 = output.data.mean()
-    #errD = errD_real + errD_fake
-    #optimizerD.step() # .step() can be called once the gradients are computed
+    output = netD(fake.detach()) # add ".detach()" to avoid backprop through G
+    output_patch = netD_patch(fake.detach())
+    errD_fake = criterion(lowerbound(output), label)
+    errD_fake.backward() # gradients for fake/real will be accumulated
+    errD_patch_fake = criterion(lowerbound(output_patch), label)
+    errD_patch_fake.backward() # gradients for fake/real will be accumulated
+    D_G_z1 = output.data.mean()
+    errD = errD_real + errD_fake
 
-    #############################
-    ## (2) Update G network: maximize log(D(G(z)))
+    grad_penalty =  calc_gradient_penalty_DRAGAN(netD, input)
+    grad_penalty.backward()
+    #grad_penalty_patch =  calc_gradient_penalty_DRAGAN(netD_patch, input)
+    optimizerD.step() # .step() can be called once the gradients are computed
+    optimizerD_patch.step()
+
     ############################
-    #netG.zero_grad()
-    #label.data.fill_(real_label) # fake labels are real for generator cost
-    #output = netD(fake_o)
-    #output = lowerbound(output)
-    #errG = criterion(output, label)
-    #errG.backward() # True if backward through the graph for the second time
-    #D_G_z2 = output.data.mean()
-    #optimizerG.step()
+    # (2) Update G network: maximize log(D(G(z)))
+    ###########################
+    netG.zero_grad()
+    label.data.fill_(real_label) # fake labels are real for generator cost
+    output = netD(fake_o)
+    output_patch = netD_patch(fake_o)
+    errG = criterion(lowerbound(output), label)
+    errG.backward(retain_graph=True) 
+    errG_patch = criterion(lowerbound(output_patch), label)
+    errG_patch.backward() 
+    D_G_z2 = output.data.mean()
+    optimizerG.step()
 
     end_iter = time.time()
 
-    #print('[%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f VAE: %.4f Elapsed %.2f s'
-    #    % (iteration, opt.niter,
-    #    errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2, loss.data[0], end_iter-start_iter))
-    print(iteration, loss.data[0])
+    print('[%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f Elapsed %.2f s'
+        % (iteration, opt.niter,
+        errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2, end_iter-start_iter))
+    #print(iteration, loss.data[0])
 
     ########### Learning Rate Decay #########
-    optimizerD = adjust_learning_rate(optimizerD,iteration)
-    optimizerG = adjust_learning_rate(optimizerG,iteration)
+    #optimizerD = adjust_learning_rate(optimizerD,iteration)
+    #optimizerG = adjust_learning_rate(optimizerG,iteration)
 
 
     if iteration % 500 == 0:
         # the first 64 samples from the mini-batch are saved.
-        vutils.save_image(real_cpu[0:64,:,:,:],
-                '%s/real_samples_%03d.png' % (opt.imDir, iteration), nrow=8)
-        vutils.save_image(recon.data[0:64,:,:,:],
-                '%s/recon_samples_epoch_%03d.png' % (opt.imDir, iteration), nrow=8)
-        #fake,_ = netG(noise)
-        #vutils.save_image(fake.data[0:64,:,:,:],
-        #        '%s/fake_samples_epoch_%03d.png' % (opt.imDir, iteration), nrow=8)
+        #vutils.save_image(real_cpu[0:64,:,:,:],
+        #        '%s/real_samples_%03d.png' % (opt.imDir, iteration), nrow=8)
+        fake,_ = netG(noise)
+        vutils.save_image(fake.data[0:64,:,:,:],
+                '%s/fake_samples_epoch_%03d.png' % (opt.imDir, iteration), nrow=8, normalize=True)
     if iteration % opt.save_step == 0:
         # do checkpointing
         torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.modelsDir, iteration))
-        torch.save(netENC.state_dict(), '%s/netENC_epoch_%d.pth' % (opt.modelsDir, iteration))
+        torch.save(netD.state_dict(), '%s/netD_epoch_%d.pth' % (opt.modelsDir, iteration))
+        torch.save(netD_patch.state_dict(), '%s/netD_patch_epoch_%d.pth' % (opt.modelsDir, iteration))

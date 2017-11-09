@@ -212,6 +212,50 @@ class _netG_1(nn.Module):
         return nn.parallel.data_parallel(self.main, input, gpu_ids), 0
 
 
+class patchD(nn.Module):
+    def __init__(self, ngpu, nz, nc, ndf,  n_extra_layers_d, norm, imageSize):
+        super(patchD, self).__init__()
+        self.ngpu = ngpu
+        self.norm1 = nn.BatchNorm2d(ndf * 2)
+        self.norm2 = nn.BatchNorm2d(ndf * 4)
+        self.norm3 = nn.BatchNorm2d(ndf * 8)
+        self.norm_128 = nn.BatchNorm2d(ndf)
+        if imageSize == 128:
+            self.conv1 = nn.Sequential(
+                            nn.Conv2d(nc, ndf, 4, 2, 1, bias=False), # 5,3,1 for 96x96
+                            nn.LeakyReLU(0.2, inplace=True),
+                            nn.Conv2d(ndf, ndf, 4, 2, 1, bias=False), # 5,3,1 for 96x96
+                            self.norm_128
+                            )
+        else:
+            self.conv1 = nn.Conv2d(nc, ndf, 4, 2, 1, bias=False), # 5,3,1 for 96x96
+
+        main = nn.Sequential(
+            self.conv1, #32 x 32
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False), #16x16
+            self.norm1,
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ndf * 2, ndf * 4, 4, 1, 1, bias=False), #15 x 15
+            self.norm2,
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ndf * 4, 1, 4, 1, 1, bias=False), #14x14
+            nn.Sigmoid()
+        )
+
+        # state size. 1 x 1 x 1
+        self.main = main
+
+    def forward(self, input):
+        gpu_ids = None
+        if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
+            gpu_ids = range(self.ngpu)
+            output = nn.parallel.data_parallel(self.main, input, gpu_ids)
+        # Avoid multi-gpu if only using one gpu
+        output = self.main(input)
+        return output.mean()
+
+        #return output.view(-1, 1)
 class _netD_1(nn.Module):
     def __init__(self, ngpu, nz, nc, ndf,  n_extra_layers_d, norm, imageSize):
         super(_netD_1, self).__init__()
