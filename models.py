@@ -216,16 +216,21 @@ class patchD(nn.Module):
     def __init__(self, ngpu, nz, nc, ndf,  n_extra_layers_d, norm, imageSize):
         super(patchD, self).__init__()
         self.ngpu = ngpu
-        self.norm1 = nn.BatchNorm2d(ndf * 2)
-        self.norm2 = nn.BatchNorm2d(ndf * 4)
-        self.norm3 = nn.BatchNorm2d(ndf * 8)
-        self.norm_128 = nn.BatchNorm2d(ndf)
         if imageSize == 128:
+           # self.conv1 = nn.Sequential(
+           #                 nn.Conv2d(nc, ndf, 4, 2, 1, bias=False), # 5,3,1 for 96x96
+           #                 nn.LeakyReLU(0.2, inplace=True),
+           #                 nn.Conv2d(ndf, ndf, 4, 2, 1, bias=False), # 5,3,1 for 96x96
+           #                 self.norm_128
+           #                 )
             self.conv1 = nn.Sequential(
-                            nn.Conv2d(nc, ndf, 4, 2, 1, bias=False), # 5,3,1 for 96x96
+                            nn.Conv2d(nc, ndf, 4, 2, 1, bias=False), # 64 x 64
                             nn.LeakyReLU(0.2, inplace=True),
-                            nn.Conv2d(ndf, ndf, 4, 2, 1, bias=False), # 5,3,1 for 96x96
-                            self.norm_128
+                            nn.Conv2d(ndf, ndf*2, 3, 1, 1, bias=False), # 64 x 64
+                            nn.BatchNorm2d(ndf*2),
+                            nn.LeakyReLU(0.2, inplace=True),
+                            nn.Conv2d(ndf*2, ndf*4, 4, 2, 1, bias=False), # 32 x 32
+                            nn.BatchNorm2d(ndf*4),
                             )
         else:
             self.conv1 = nn.Conv2d(nc, ndf, 4, 2, 1, bias=False), # 5,3,1 for 96x96
@@ -233,13 +238,10 @@ class patchD(nn.Module):
         main = nn.Sequential(
             self.conv1, #32 x 32
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False), #16x16
-            self.norm1,
+            nn.Conv2d(ndf*4, ndf*8, 4, 1, 1, bias=False), #31x31
+            nn.BatchNorm2d(ndf*8),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(ndf * 2, ndf * 4, 4, 1, 1, bias=False), #15 x 15
-            self.norm2,
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(ndf * 4, 1, 4, 1, 1, bias=False), #14x14
+            nn.Conv2d(ndf*8, 1, 4, 1, 1, bias=False), #30x30
             nn.Sigmoid()
         )
 
@@ -257,9 +259,12 @@ class patchD(nn.Module):
 
         #return output.view(-1, 1)
 class _netD_1(nn.Module):
-    def __init__(self, ngpu, nz, nc, ndf,  n_extra_layers_d, norm, imageSize):
+    def __init__(self, ngpu, nz, nc, ndf,  n_extra_layers_d, norm, imageSize, n_B=128, n_C=16):
         super(_netD_1, self).__init__()
         self.ngpu = ngpu
+        self.n_B = n_B
+        self.n_C = n_C
+        self.ndf = ndf
         if norm == 'BatchNorm':
             self.norm1 = nn.BatchNorm2d(ndf * 2)
             self.norm2 = nn.BatchNorm2d(ndf * 4)
@@ -294,7 +299,7 @@ class _netD_1(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
             # state size. (ndf*4) x 8 x 8
             nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
-            self.norm3,
+            self.norm3, 
             nn.LeakyReLU(0.2, inplace=True),
             # state size. (ndf*8) x 4 x 4
         )
@@ -313,8 +318,10 @@ class _netD_1(nn.Module):
                             nn.LeakyReLU(0.2, inplace=True))
 
 
-        main.add_module('final_layers.conv', nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False))
-        main.add_module('final_layers.sigmoid', nn.Sigmoid())
+        T_ten_init = torch.randn(ndf * 8 * 4 * 4, n_B * n_C) * 0.1
+        self.T_tensor = nn.Parameter(T_ten_init, requires_grad=True)
+        self.fc = nn.Linear(ndf * 8 * 4 * 4 + n_B, 1)
+        self.sigmoid = nn.Sigmoid()
         # state size. 1 x 1 x 1
         self.main = main
 
@@ -325,6 +332,21 @@ class _netD_1(nn.Module):
             output = nn.parallel.data_parallel(self.main, input, gpu_ids)
         # Avoid multi-gpu if only using one gpu
         output = self.main(input)
+        output = output.view(output.size(0), -1)
+
+        ##### Minibatch Discrimination ###
+        T_tensor = self.T_tensor.cuda()
+        matrices = output.mm(self.T_tensor.view(self.ndf*8*4*4, -1)) #Nx(B*C)
+        matrices = matrices.view(-1, self.n_B, self.n_C) #NxBxC
+ 
+        M = matrices.unsqueeze(0)  # 1xNxBxC
+        M_T = M.permute(1, 0, 2, 3)  # Nx1xBxC
+        norm = torch.abs(M - M_T).sum(3)  # NxNxB
+        expnorm = torch.exp(-norm)
+        o_b = (expnorm.sum(0) - 1)   # NxB, subtract self distance
+        output = torch.cat([output, o_b], 1)
+        # #### Minibatch Discrimination ###
+        output = self.sigmoid(self.fc(output))
         return output.mean(0).view(1)
         #return output.view(-1, 1)
     

@@ -1,6 +1,6 @@
 from __future__ import print_function
 import os
-os.environ["CUDA_VISIBLE_DEVICES"]="2"
+os.environ["CUDA_VISIBLE_DEVICES"]="1"
 import time
 import random
 import argparse
@@ -34,7 +34,6 @@ parser.add_argument('--lr', type=float, default=0.0001, help='learning rate, def
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
 parser.add_argument('--cuda'  , type=int, default=1, help='enables cuda')
 parser.add_argument('--ngpu'  , type=int, default=1, help='number of GPUs to use')
-parser.add_argument('--netENC', default='', help="path to netG (to continue training)")
 parser.add_argument('--netG', default='', help="path to netG (to continue training)")
 parser.add_argument('--netD', default='', help="path to netD (to continue training)")
 parser.add_argument('--netD_patch', default='', help="path to netD (to continue training)")
@@ -44,6 +43,7 @@ parser.add_argument('--d_labelSmooth', type=float, default=0.1, help='for D, use
 parser.add_argument('--n_extra_layers_d', type=int, default=0, help='number of extra conv layers in D')
 parser.add_argument('--n_extra_layers_g', type=int, default=1, help='number of extra conv layers in G')
 parser.add_argument('--pix_shuf'  , type=int, default=1, help='Use pixel shuffle instead of deconvolution')
+parser.add_argument('--only_patch'  , type=int, default=0, help='Use pixel shuffle instead of deconvolution')
 parser.add_argument('--white_noise'  , type=int, default=0, help='Add white noise to inputs of discriminator to stabilize training')
 parser.add_argument('--lambda_'  , type=int, default=10, help='Weight of gradient penalty (DRAGAN)')
 parser.add_argument('--lr_decay_every', type=int, default=3000, help='decay lr this many iterations')
@@ -128,16 +128,6 @@ def calc_gradient_penalty_DRAGAN(netD, X):
 def lowerbound(input):
     return torch.max(input, epsilon)
 
-def vae_loss(mu, logvar, pred, gt, batch_size): 
-    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    kl_loss /= (batch_size * opt.nz)
-    #kl_element = torch.add(torch.add(torch.add(mu.pow(2), logvar.exp()), -1), logvar.mul(-1))
-    #kl_loss = torch.sum(kl_element).mul(.5)
-    recon_loss = torch.sum(torch.abs(pred - gt))
-    #recon_loss = torch.sum((pred-gt).pow(2))
-    return kl_loss+recon_loss*1e-4
-
-
     
 nc = 3
 ngpu = opt.ngpu
@@ -174,10 +164,11 @@ if opt.netG != '':
     netG.load_state_dict(torch.load(opt.netG))
 print(netG)
 
-netD.apply(weights_init)
-if opt.netD != '':
-    netD.load_state_dict(torch.load(opt.netD))
-print(netD)
+if not opt.only_patch:
+    netD.apply(weights_init)
+    if opt.netD != '':
+        netD.load_state_dict(torch.load(opt.netD))
+    print(netD)
 
 netD_patch.apply(weights_init)
 if opt.netD_patch != '':
@@ -198,7 +189,8 @@ lambda_k = 0.001
 k = 0.
 
 if opt.cuda:
-    netD.cuda()
+    if not opt.only_patch:
+        netD.cuda()
     netD_patch.cuda()
     netG.cuda()
     criterion.cuda()
@@ -212,10 +204,10 @@ epsilon = Variable(epsilon)
 noise = Variable(noise)
 
 # setup optimizer
-optimizerD = optim.Adam(netD.parameters(), lr = opt.lr, betas = (opt.beta1, 0.999))
+if not opt.only_patch:
+    optimizerD = optim.Adam(netD.parameters(), lr = opt.lr, betas = (opt.beta1, 0.999))
 optimizerD_patch = optim.Adam(netD_patch.parameters(), lr = opt.lr, betas = (opt.beta1, 0.999))
 optimizerG = optim.Adam(netG.parameters(), lr = opt.lr, betas = (opt.beta1, 0.999))
-
 
 for iteration in range(1, opt.niter+1):
     try: 
@@ -232,7 +224,8 @@ for iteration in range(1, opt.niter+1):
     # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
     ###########################
     # train with real
-    netD.zero_grad()
+    if not opt.only_patch:
+        netD.zero_grad()
     netD_patch.zero_grad()
     noise.data.resize_(batchSize, nz, 1, 1)
     noise.data.normal_(0, 1)
@@ -243,39 +236,46 @@ for iteration in range(1, opt.niter+1):
         additive_noise.data.resize_(input.size()).normal_(0, 0.005)
         input.data.add_(additive_noise.data)
 
-    output = netD(input)
-    output_patch = netD_patch(input)
+    if not opt.only_patch:
+        output = netD(input)
+        errD_real = criterion(lowerbound(output), label)
+        errD_real.backward()
 
-    # Prevent numerical instability
-    errD_real = criterion(lowerbound(output), label)
-    errD_real.backward()
-    errD_patch_real = criterion(lowerbound(output_patch), label)
-    errD_patch_real.backward()
-    D_x = output.data.mean()
+    patch_local, patch_glob = netD_patch(input)
+    err_patch_local_r = criterion(lowerbound(patch_local), label)
+    err_patch_glob_r = criterion(lowerbound(patch_glob), label)
+    err = err_patch_local_r + err_patch_glob_r
+    err.backward()
+    D_x = err_patch_local_r.data.mean() + err_patch_glob_r.data.mean() if opt.only_patch else output.data.mean()
+
     # train with fake
-    fake_o,z_prediction = netG(noise)
+    fake, z_prediction = netG(noise)
     label.data.fill_(fake_label)
 
     if opt.white_noise:
         additive_noise.data.normal_(0, 0.005)
-        fake = fake_o + additive_noise
-        #fake.data.add_(additive_noise.data)
+        fake_n = fake + additive_noise
     else:
-        fake = fake_o
+        fake_n = fake
 
-    output = netD(fake.detach()) # add ".detach()" to avoid backprop through G
-    output_patch = netD_patch(fake.detach())
-    errD_fake = criterion(lowerbound(output), label)
-    errD_fake.backward() # gradients for fake/real will be accumulated
-    errD_patch_fake = criterion(lowerbound(output_patch), label)
-    errD_patch_fake.backward() # gradients for fake/real will be accumulated
-    D_G_z1 = output.data.mean()
-    errD = errD_real + errD_fake
+    if not opt.only_patch:
+        output = netD(fake_n.detach()) # add ".detach()" to avoid backprop through G
+        errD_fake = criterion(lowerbound(output), label)
+        errD_fake.backward() 
 
-    grad_penalty =  calc_gradient_penalty_DRAGAN(netD, input)
-    grad_penalty.backward()
+    patch_local, patch_glob = netD_patch(fake_n.detach())
+    err_patch_local_f = criterion(lowerbound(patch_local), label)
+    err_patch_glob_f = criterion(lowerbound(patch_glob), label)
+    err = err_patch_local_f + err_patch_glob_f
+    err.backward()
+    D_G_z1 = err_patch_local_f.data.mean() + err_patch_glob_f.data.mean() if opt.only_patch else output.data.mean()
+    errD = err_patch_local_f + err_patch_local_r + err_patch_glob_f + err_patch_local_f
+
+    #grad_penalty =  calc_gradient_penalty_DRAGAN(netD, input)
+    #grad_penalty.backward()
     #grad_penalty_patch =  calc_gradient_penalty_DRAGAN(netD_patch, input)
-    optimizerD.step() # .step() can be called once the gradients are computed
+    if not opt.only_patch:
+        optimizerD.step()
     optimizerD_patch.step()
 
     ############################
@@ -283,14 +283,19 @@ for iteration in range(1, opt.niter+1):
     ###########################
     netG.zero_grad()
     label.data.fill_(real_label) # fake labels are real for generator cost
-    output = netD(fake_o)
-    output_patch = netD_patch(fake_o)
-    errG = criterion(lowerbound(output), label)
-    errG.backward(retain_graph=True) 
-    errG_patch = criterion(lowerbound(output_patch), label)
-    errG_patch.backward() 
-    D_G_z2 = output.data.mean()
+    if not opt.only_patch:
+        output = netD(fake)
+        errG = criterion(lowerbound(output), label)
+        errG.backward(retain_graph=True) 
+
+    patch_local, patch_glob = netD_patch(fake)
+    err_patch_local = criterion(lowerbound(patch_local), label)
+    err_patch_glob = criterion(lowerbound(patch_glob), label)
+    err = err_patch_local + err_patch_glob
+    err.backward()
+    D_G_z2 = err_patch_local.data.mean() + err_patch_glob.data.mean() if opt.only_patch else output.data.mean()
     optimizerG.step()
+    errG = err_patch_local + err_patch_glob
 
     end_iter = time.time()
 
@@ -314,5 +319,6 @@ for iteration in range(1, opt.niter+1):
     if iteration % opt.save_step == 0:
         # do checkpointing
         torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.modelsDir, iteration))
-        torch.save(netD.state_dict(), '%s/netD_epoch_%d.pth' % (opt.modelsDir, iteration))
         torch.save(netD_patch.state_dict(), '%s/netD_patch_epoch_%d.pth' % (opt.modelsDir, iteration))
+        if not opt.only_patch:
+            torch.save(netD.state_dict(), '%s/netD_epoch_%d.pth' % (opt.modelsDir, iteration))
